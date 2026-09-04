@@ -1,0 +1,347 @@
+:root {
+  --bg: #0e0e10;
+  --panel: #18181b;
+  --panel-2: #1f1f23;
+  --border: #2d2d33;
+  --text: #efeff1;
+  --text-dim: #adadb8;
+  --accent: #9147ff;
+  --accent-hover: #7a2ff2;
+  --danger: #f13f3f;
+  --radius: 10px;
+  --gap: 8px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Inter", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  overflow: hidden;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+}
+
+#toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+
+#toolbarMain {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+#toolbar.collapsed #toolbarMain {
+  display: none;
+}
+
+.brand {
+  font-weight: 700;
+  font-size: 1.05rem;
+  white-space: nowrap;
+}
+.brand span { color: var(--accent); }
+
+#addForm {
+  display: flex;
+  gap: 8px;
+  flex: 1 1 260px;
+  min-width: 200px;
+}
+
+#channelInput {
+  flex: 1;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  font-size: 0.9rem;
+  outline: none;
+}
+#channelInput:focus { border-color: var(--accent); }
+
+#addForm button {
+  background: var(--accent);
+  border: none;
+  color: white;
+  padding: 8px 14px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+#addForm button:hover { background: var(--accent-hover); }
+
+.modeSwitch {
+  display: flex;
+  background: var(--panel-2);
+  border-radius: var(--radius);
+  padding: 3px;
+  border: 1px solid var(--border);
+}
+
+.modeBtn {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  padding: 6px 14px;
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+.modeBtn.active {
+  background: var(--accent);
+  color: white;
+}
+
+#toggleToolbar {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 7px;
+  cursor: pointer;
+  padding: 6px 10px;
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+#stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  overflow: hidden;
+}
+
+#emptyState {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  text-align: center;
+  padding: 20px;
+}
+#emptyState p { margin: 4px 0; }
+
+.view {
+  position: absolute;
+  inset: 0;
+  display: none;
+}
+.view.active { display: flex; }
+
+/* Grid mode */
+#gridView {
+  flex-wrap: wrap;
+  align-content: center;
+  justify-content: center;
+  align-items: center;
+  gap: var(--gap);
+  padding: var(--gap);
+  overflow: auto;
+}
+
+.tile {
+  position: relative;
+  background: #000;
+  border-radius: var(--radius);
+  overflow: hidden;
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+}
+
+.tile iframe {
+  width: 100%;
+  height: 100%;
+  border: none;
+  display: block;
+}
+
+.tile .tileBar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 8px;
+  background: linear-gradient(to bottom, rgba(0,0,0,0.75), transparent);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  pointer-events: none;
+  z-index: 2;
+}
+.tile:hover .tileBar {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.tileName {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: white;
+  text-shadow: 0 1px 2px black;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tileActions {
+  display: flex;
+  gap: 4px;
+}
+
+.iconBtn {
+  background: rgba(24,24,27,0.85);
+  border: 1px solid var(--border);
+  color: white;
+  border-radius: 6px;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 0.75rem;
+  line-height: 1;
+}
+.iconBtn:hover { background: var(--accent); }
+.iconBtn.danger:hover { background: var(--danger); }
+.iconBtn.muted { color: var(--danger); }
+
+/* Focus mode */
+#focusView {
+  padding: var(--gap);
+  gap: var(--gap);
+}
+#focusView.row { flex-direction: row; }
+#focusView.col { flex-direction: column; }
+
+#focusMain {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  overflow: hidden;
+}
+#focusMain .tile {
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+#focusMain iframe {
+  width: 100%;
+  height: 100%;
+  border: none;
+  display: block;
+}
+
+#focusHandle {
+  flex: 0 0 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  display: none;
+  position: relative;
+}
+#focusHandle.visible { display: block; }
+#focusView.row #focusHandle { cursor: col-resize; }
+#focusView.col #focusHandle { cursor: row-resize; }
+#focusHandle:hover, #focusHandle.dragging {
+  background: var(--accent);
+}
+#focusHandle::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: var(--text-dim);
+  border-radius: 2px;
+}
+#focusView.row #focusHandle::after { width: 3px; height: 28px; }
+#focusView.col #focusHandle::after { width: 28px; height: 3px; }
+
+#focusSidebar {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: center;
+  justify-content: center;
+  align-items: center;
+  overflow: auto;
+  gap: var(--gap);
+  min-width: 0;
+  min-height: 0;
+}
+
+#focusSidebar .tile {
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+#focusSidebar .tile::after {
+  content: "Cliquer pour passer en principal";
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  font-size: 0.7rem;
+  color: white;
+  background: rgba(0,0,0,0.55);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  padding: 4px;
+  z-index: 1;
+}
+#focusSidebar .tile:hover::after {
+  opacity: 1;
+}
+
+.mainBadge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  background: var(--accent);
+  color: white;
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  z-index: 2;
+}
+
+#focusSidebar::-webkit-scrollbar,
+#gridView::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+#focusSidebar::-webkit-scrollbar-thumb,
+#gridView::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}

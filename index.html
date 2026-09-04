@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TwitchMultiView</title>
+<meta name="description" content="Suivez plusieurs streams Twitch simultanément">
+<meta name="theme-color" content="#9147ff">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="MultiView">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header id="toolbar">
+    <div id="toolbarMain">
+      <div class="brand">Twitch<span>MultiView</span></div>
+
+      <form id="addForm" autocomplete="off">
+        <input id="channelInput" type="text" placeholder="Ajouter une chaîne (ex: zerator, ponce)" />
+        <button type="submit">Ajouter</button>
+      </form>
+
+      <div class="modeSwitch" role="group" aria-label="Mode d'affichage">
+        <button id="modeGrid" class="modeBtn active" data-mode="grid">Grille</button>
+        <button id="modeFocus" class="modeBtn" data-mode="focus">Focus</button>
+      </div>
+    </div>
+
+    <button id="toggleToolbar" title="Masquer/afficher la barre">▾</button>
+  </header>
+
+  <main id="stage">
+    <div id="emptyState">
+      <p>Aucune chaîne ajoutée.</p>
+      <p>Utilisez le champ ci-dessus pour ajouter des streamers à suivre (ZEvent, multigaming, etc.)</p>
+    </div>
+    <div id="gridView" class="view"></div>
+    <div id="focusView" class="view">
+      <div id="focusMain"></div>
+      <div id="focusHandle" title="Glisser pour redimensionner"></div>
+      <div id="focusSidebar"></div>
+    </div>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
