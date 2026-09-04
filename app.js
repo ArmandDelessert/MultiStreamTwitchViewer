@@ -3,6 +3,7 @@
 
   const RATIO = 16 / 9;
   const GAP = 8;
+  const HANDLE_SIZE = 8;
   const STORAGE_KEY = "twitchMultiView.state.v1";
   const MIN_MAIN_FRAC = 0.25;
   const MAX_MAIN_FRAC = 0.8;
@@ -13,23 +14,21 @@
   const el = {
     stage: document.getElementById("stage"),
     emptyState: document.getElementById("emptyState"),
-    gridView: document.getElementById("gridView"),
-    focusView: document.getElementById("focusView"),
-    focusMain: document.getElementById("focusMain"),
+    tilesLayer: document.getElementById("tilesLayer"),
     focusHandle: document.getElementById("focusHandle"),
-    focusSidebar: document.getElementById("focusSidebar"),
     addForm: document.getElementById("addForm"),
     channelInput: document.getElementById("channelInput"),
     modeGrid: document.getElementById("modeGrid"),
     modeFocus: document.getElementById("modeFocus"),
-    toggleToolbar: document.getElementById("toggleToolbar"),
+    fullscreenBtn: document.getElementById("fullscreenBtn"),
     toolbar: document.getElementById("toolbar"),
   };
 
-  // Tracks what's currently built in the DOM so we only recreate <iframe>s
-  // (which reloads the stream) when the set of channels actually changes,
-  // not on every resize/drag.
-  let builtKey = null;
+  // channel -> { el, player, muteBtn, hintEl }. A tile is created once when
+  // a channel is added and lives until it's removed — switching modes or
+  // resizing only ever repositions these elements, never recreates the
+  // underlying Twitch player/iframe.
+  const tiles = new Map();
 
   function loadState() {
     try {
@@ -69,94 +68,41 @@
     return s || null;
   }
 
-  function addChannels(input) {
-    const parts = input.split(",").map(normalizeChannel).filter(Boolean);
-    let added = false;
-    for (const name of parts) {
-      if (!state.channels.includes(name)) {
-        state.channels.push(name);
-        if (state.muted[name] === undefined) state.muted[name] = true;
-        added = true;
+  function getMainName() {
+    if (state.channels.includes(state.mainChannel)) return state.mainChannel;
+    return state.channels[0] || null;
+  }
+
+  // ---- Tile lifecycle (created once per channel) ----
+
+  function createTile(name) {
+    const container = document.createElement("div");
+    container.className = "tile";
+    container.dataset.channel = name;
+
+    const mount = document.createElement("div");
+    mount.className = "tileMount";
+    mount.id = `twitch-player-${name}`;
+    container.appendChild(mount);
+
+    const badge = document.createElement("div");
+    badge.className = "mainBadge";
+    badge.textContent = "PRINCIPAL";
+    container.appendChild(badge);
+
+    const catcher = document.createElement("div");
+    catcher.className = "tileClickCatcher";
+    const hint = document.createElement("span");
+    hint.className = "tileHint";
+    catcher.appendChild(hint);
+    catcher.addEventListener("click", () => {
+      if (state.mode === "grid") {
+        switchToFocus(name);
+      } else if (state.mode === "focus" && name !== getMainName()) {
+        setMain(name);
       }
-    }
-    if (added) {
-      if (!state.mainChannel) state.mainChannel = state.channels[0];
-      saveState();
-      render();
-    }
-  }
-
-  function removeChannel(name) {
-    state.channels = state.channels.filter((c) => c !== name);
-    delete state.muted[name];
-    if (state.mainChannel === name) {
-      state.mainChannel = state.channels[0] || null;
-    }
-    saveState();
-    render();
-  }
-
-  function setMode(mode) {
-    state.mode = mode;
-    if (mode === "focus" && !state.mainChannel && state.channels.length) {
-      state.mainChannel = state.channels[0];
-    }
-    saveState();
-    render();
-  }
-
-  function setMain(name) {
-    state.mainChannel = name;
-    saveState();
-    render();
-  }
-
-  function toggleMute(name) {
-    state.muted[name] = !state.muted[name];
-    saveState();
-    const tile = el.gridView.querySelector(`.tile[data-channel="${cssEscape(name)}"]`);
-    if (tile) {
-      const iframe = tile.querySelector("iframe");
-      const muted = state.muted[name] !== false;
-      iframe.src = embedUrl(name, muted);
-      const btn = tile.querySelector(".iconBtn.muteBtn");
-      if (btn) {
-        btn.classList.toggle("muted", muted);
-        btn.textContent = muted ? "🔇" : "🔊";
-        btn.title = muted ? "Activer le son" : "Couper le son";
-      }
-    }
-  }
-
-  function cssEscape(s) {
-    return window.CSS && CSS.escape ? CSS.escape(s) : s.replace(/["\\]/g, "\\$&");
-  }
-
-  function embedUrl(channel, muted) {
-    const params = new URLSearchParams();
-    params.set("channel", channel);
-    params.set("parent", location.hostname || "localhost");
-    params.set("muted", muted ? "true" : "false");
-    params.set("autoplay", "true");
-    return `https://player.twitch.tv/?${params.toString()}`;
-  }
-
-  function makeTile(name, { muted, showMuteToggle, badge }) {
-    const tile = document.createElement("div");
-    tile.className = "tile";
-    tile.dataset.channel = name;
-
-    const iframe = document.createElement("iframe");
-    iframe.src = embedUrl(name, muted);
-    iframe.allowFullscreen = true;
-    tile.appendChild(iframe);
-
-    if (badge) {
-      const b = document.createElement("div");
-      b.className = "mainBadge";
-      b.textContent = "PRINCIPAL";
-      tile.appendChild(b);
-    }
+    });
+    container.appendChild(catcher);
 
     const bar = document.createElement("div");
     bar.className = "tileBar";
@@ -169,18 +115,13 @@
     const actions = document.createElement("div");
     actions.className = "tileActions";
 
-    if (showMuteToggle) {
-      const muted0 = state.muted[name] !== false;
-      const muteBtn = document.createElement("button");
-      muteBtn.className = "iconBtn muteBtn" + (muted0 ? " muted" : "");
-      muteBtn.textContent = muted0 ? "🔇" : "🔊";
-      muteBtn.title = muted0 ? "Activer le son" : "Couper le son";
-      muteBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        toggleMute(name);
-      });
-      actions.appendChild(muteBtn);
-    }
+    const muteBtn = document.createElement("button");
+    muteBtn.className = "iconBtn muteBtn";
+    muteBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleMute(name);
+    });
+    actions.appendChild(muteBtn);
 
     const removeBtn = document.createElement("button");
     removeBtn.className = "iconBtn danger";
@@ -193,10 +134,142 @@
     actions.appendChild(removeBtn);
 
     bar.appendChild(actions);
-    tile.appendChild(bar);
+    container.appendChild(bar);
 
-    return tile;
+    el.tilesLayer.appendChild(container);
+
+    let player = null;
+    if (window.Twitch && window.Twitch.Player) {
+      player = new window.Twitch.Player(mount.id, {
+        width: "100%",
+        height: "100%",
+        channel: name,
+        parent: [location.hostname || "localhost"],
+        muted: true,
+        autoplay: true,
+      });
+    } else {
+      console.warn("Twitch embed SDK not available; falling back to iframe for", name);
+      const iframe = document.createElement("iframe");
+      iframe.allowFullscreen = true;
+      const params = new URLSearchParams({
+        channel: name,
+        parent: location.hostname || "localhost",
+        muted: "true",
+        autoplay: "true",
+      });
+      iframe.src = `https://player.twitch.tv/?${params.toString()}`;
+      mount.appendChild(iframe);
+    }
+
+    const record = { el: container, player, muteBtn, hint };
+    tiles.set(name, record);
+    updateMuteButton(name);
+    return record;
   }
+
+  function destroyTile(name) {
+    const record = tiles.get(name);
+    if (!record) return;
+    try {
+      if (record.player && typeof record.player.destroy === "function") {
+        record.player.destroy();
+      }
+    } catch (e) {
+      /* ignore */
+    }
+    record.el.remove();
+    tiles.delete(name);
+  }
+
+  function setPlayerMuted(name, muted) {
+    const record = tiles.get(name);
+    if (!record) return;
+    try {
+      if (record.player && typeof record.player.setMuted === "function") {
+        record.player.setMuted(muted);
+      }
+    } catch (e) {
+      /* player not ready yet; it will pick up the initial "muted" option */
+    }
+  }
+
+  function updateMuteButton(name) {
+    const record = tiles.get(name);
+    if (!record) return;
+    const muted = state.muted[name] !== false;
+    record.muteBtn.classList.toggle("muted", muted);
+    record.muteBtn.textContent = muted ? "🔇" : "🔊";
+    record.muteBtn.title = muted ? "Activer le son" : "Couper le son";
+  }
+
+  function toggleMute(name) {
+    state.muted[name] = !(state.muted[name] !== false);
+    saveState();
+    updateMuteButton(name);
+    if (state.mode === "grid") {
+      setPlayerMuted(name, state.muted[name] !== false);
+    }
+  }
+
+  // ---- State mutations ----
+
+  function addChannels(input) {
+    const parts = input.split(",").map(normalizeChannel).filter(Boolean);
+    let added = false;
+    for (const name of parts) {
+      if (!state.channels.includes(name)) {
+        state.channels.push(name);
+        if (state.muted[name] === undefined) state.muted[name] = true;
+        createTile(name);
+        added = true;
+      }
+    }
+    if (added) {
+      if (!state.mainChannel) state.mainChannel = state.channels[0];
+      saveState();
+      layoutAll();
+    }
+  }
+
+  function removeChannel(name) {
+    state.channels = state.channels.filter((c) => c !== name);
+    delete state.muted[name];
+    destroyTile(name);
+    if (state.mainChannel === name) {
+      state.mainChannel = state.channels[0] || null;
+    }
+    saveState();
+    layoutAll();
+  }
+
+  function setMode(mode) {
+    state.mode = mode;
+    if (mode === "focus" && !state.mainChannel && state.channels.length) {
+      state.mainChannel = state.channels[0];
+    }
+    saveState();
+    el.modeGrid.classList.toggle("active", state.mode === "grid");
+    el.modeFocus.classList.toggle("active", state.mode === "focus");
+    layoutAll();
+  }
+
+  function setMain(name) {
+    state.mainChannel = name;
+    saveState();
+    layoutAll();
+  }
+
+  function switchToFocus(name) {
+    state.mode = "focus";
+    state.mainChannel = name;
+    saveState();
+    el.modeGrid.classList.toggle("active", false);
+    el.modeFocus.classList.toggle("active", true);
+    layoutAll();
+  }
+
+  // ---- Layout ----
 
   function computeGrid(n, W, H, ratio, gap) {
     let best = null;
@@ -220,138 +293,106 @@
     return best;
   }
 
+  // Lays out `names` inside a box (boxX,boxY,boxW,boxH), centering the
+  // whole block and centering each (possibly partial) row within it —
+  // matching how a wrapping flex row with justify-content:center looks.
+  function packGrid(names, boxX, boxY, boxW, boxH, positions, isMainFlag) {
+    const n = names.length;
+    if (n === 0) return;
+    const { cols, rows, w, h } = computeGrid(n, boxW, boxH, RATIO, GAP);
+    const totalW = cols * w + (cols - 1) * GAP;
+    const totalH = rows * h + (rows - 1) * GAP;
+    const offsetX = boxX + (boxW - totalW) / 2;
+    const offsetY = boxY + (boxH - totalH) / 2;
+
+    names.forEach((name, i) => {
+      const row = Math.floor(i / cols);
+      const col = i % cols;
+      const itemsInRow = Math.min(cols, n - row * cols);
+      const rowW = itemsInRow * w + (itemsInRow - 1) * GAP;
+      const rowOffsetX = offsetX + (totalW - rowW) / 2;
+      const x = rowOffsetX + col * (w + GAP);
+      const y = offsetY + row * (h + GAP);
+      positions.set(name, { x, y, w, h, isMain: !!isMainFlag });
+    });
+  }
+
   function clamp(min, val, max) {
     return Math.max(min, Math.min(max, val));
   }
 
-  // ---- Grid mode ----
-
-  function buildGrid() {
-    el.gridView.innerHTML = "";
-    for (const name of state.channels) {
-      const tile = makeTile(name, {
-        muted: state.muted[name] !== false,
-        showMuteToggle: true,
-        badge: false,
-      });
-      el.gridView.appendChild(tile);
-    }
-  }
-
-  function layoutGrid() {
-    const n = state.channels.length;
-    if (n === 0) return;
-    const rect = el.gridView.getBoundingClientRect();
-    const W = rect.width - GAP * 2;
-    const H = rect.height - GAP * 2;
-    const { w, h } = computeGrid(n, W, H, RATIO, GAP);
-    for (const tile of el.gridView.children) {
-      tile.style.width = `${Math.floor(w)}px`;
-      tile.style.height = `${Math.floor(h)}px`;
-    }
-  }
-
-  // ---- Focus mode ----
-
-  function buildFocus(mainName, others) {
-    el.focusMain.innerHTML = "";
-    el.focusSidebar.innerHTML = "";
-
-    const mainTile = makeTile(mainName, { muted: false, showMuteToggle: false, badge: others.length > 0 });
-    el.focusMain.appendChild(mainTile);
-
-    for (const name of others) {
-      const tile = makeTile(name, { muted: true, showMuteToggle: false, badge: false });
-      tile.addEventListener("click", () => setMain(name));
-      el.focusSidebar.appendChild(tile);
-    }
-  }
-
-  function layoutFocus(mainName, others, overrideFrac) {
-    const rect = el.stage.getBoundingClientRect();
-    const W = rect.width - GAP * 2;
-    const H = rect.height - GAP * 2;
-    const isRow = W >= H;
-
-    el.focusView.classList.toggle("row", isRow);
-    el.focusView.classList.toggle("col", !isRow);
-    el.focusHandle.classList.toggle("visible", others.length > 0);
-
-    const mainTile = el.focusMain.firstElementChild;
-    if (!mainTile) return;
-
-    let mainW, mainH;
-
-    if (others.length === 0) {
-      el.focusMain.style.width = `${Math.floor(W)}px`;
-      el.focusMain.style.height = `${Math.floor(H)}px`;
-      el.focusSidebar.style.width = "0px";
-      el.focusSidebar.style.height = "0px";
-      if (W / H > RATIO) {
-        mainH = H;
-        mainW = mainH * RATIO;
-      } else {
-        mainW = W;
-        mainH = mainW / RATIO;
-      }
-      mainTile.style.width = `${Math.floor(mainW)}px`;
-      mainTile.style.height = `${Math.floor(mainH)}px`;
+  function layoutAll(overrideFrac) {
+    const hasChannels = state.channels.length > 0;
+    el.emptyState.style.display = hasChannels ? "none" : "flex";
+    if (!hasChannels) {
+      el.focusHandle.classList.remove("visible");
       return;
     }
 
-    const frac = clamp(MIN_MAIN_FRAC, overrideFrac ?? state.focusMainFrac, MAX_MAIN_FRAC);
-    const handleSize = 8;
+    const rect = el.stage.getBoundingClientRect();
+    const availW = rect.width - GAP * 2;
+    const availH = rect.height - GAP * 2;
+    const positions = new Map();
+    let handleBox = null;
 
-    if (isRow) {
-      const mainAreaW = W * frac - handleSize / 2;
-      const sidebarW = W - mainAreaW - GAP * 2 - handleSize;
-      const mainAreaH = H;
-
-      el.focusMain.style.width = `${Math.floor(mainAreaW)}px`;
-      el.focusMain.style.height = `${Math.floor(mainAreaH)}px`;
-      el.focusSidebar.style.width = `${Math.floor(sidebarW)}px`;
-      el.focusSidebar.style.height = `${Math.floor(mainAreaH)}px`;
-
-      if (mainAreaW / mainAreaH > RATIO) {
-        mainH = mainAreaH;
-        mainW = mainH * RATIO;
-      } else {
-        mainW = mainAreaW;
-        mainH = mainAreaW / RATIO;
-      }
-      mainTile.style.width = `${Math.floor(mainW)}px`;
-      mainTile.style.height = `${Math.floor(mainH)}px`;
-
-      const { w, h } = computeGrid(others.length, sidebarW, H, RATIO, GAP);
-      for (const tile of el.focusSidebar.children) {
-        tile.style.width = `${Math.floor(w)}px`;
-        tile.style.height = `${Math.floor(h)}px`;
-      }
+    if (state.mode === "grid") {
+      packGrid(state.channels, GAP, GAP, availW, availH, positions, false);
     } else {
-      const mainAreaH = H * frac - handleSize / 2;
-      const sidebarH = H - mainAreaH - GAP * 2 - handleSize;
-      const mainAreaW = W;
+      const mainName = getMainName();
+      const others = state.channels.filter((c) => c !== mainName);
+      const isRow = availW >= availH;
 
-      el.focusMain.style.width = `${Math.floor(mainAreaW)}px`;
-      el.focusMain.style.height = `${Math.floor(mainAreaH)}px`;
-      el.focusSidebar.style.width = `${Math.floor(mainAreaW)}px`;
-      el.focusSidebar.style.height = `${Math.floor(sidebarH)}px`;
-
-      if (mainAreaW / mainAreaH > RATIO) {
-        mainH = mainAreaH;
-        mainW = mainH * RATIO;
+      if (others.length === 0) {
+        packGrid(mainName ? [mainName] : [], GAP, GAP, availW, availH, positions, true);
+      } else if (isRow) {
+        const frac = clamp(MIN_MAIN_FRAC, overrideFrac ?? state.focusMainFrac, MAX_MAIN_FRAC);
+        const mainAreaW = availW * frac - HANDLE_SIZE / 2;
+        const sidebarW = availW - mainAreaW - HANDLE_SIZE;
+        packGrid([mainName], GAP, GAP, mainAreaW, availH, positions, true);
+        packGrid(others, GAP + mainAreaW + HANDLE_SIZE, GAP, sidebarW, availH, positions, false);
+        handleBox = { x: GAP + mainAreaW, y: GAP, w: HANDLE_SIZE, h: availH, orientation: "row" };
       } else {
-        mainW = mainAreaW;
-        mainH = mainAreaW / RATIO;
+        const frac = clamp(MIN_MAIN_FRAC, overrideFrac ?? state.focusMainFrac, MAX_MAIN_FRAC);
+        const mainAreaH = availH * frac - HANDLE_SIZE / 2;
+        const sidebarH = availH - mainAreaH - HANDLE_SIZE;
+        packGrid([mainName], GAP, GAP, availW, mainAreaH, positions, true);
+        packGrid(others, GAP, GAP + mainAreaH + HANDLE_SIZE, availW, sidebarH, positions, false);
+        handleBox = { x: GAP, y: GAP + mainAreaH, w: availW, h: HANDLE_SIZE, orientation: "col" };
       }
-      mainTile.style.width = `${Math.floor(mainW)}px`;
-      mainTile.style.height = `${Math.floor(mainH)}px`;
+    }
 
-      const { w, h } = computeGrid(others.length, W, sidebarH, RATIO, GAP);
-      for (const tile of el.focusSidebar.children) {
-        tile.style.width = `${Math.floor(w)}px`;
-        tile.style.height = `${Math.floor(h)}px`;
+    for (const [name, record] of tiles) {
+      const pos = positions.get(name);
+      if (!pos) {
+        record.el.style.width = "0px";
+        record.el.style.height = "0px";
+        continue;
       }
+      record.el.style.left = `${Math.round(pos.x)}px`;
+      record.el.style.top = `${Math.round(pos.y)}px`;
+      record.el.style.width = `${Math.floor(pos.w)}px`;
+      record.el.style.height = `${Math.floor(pos.h)}px`;
+      record.el.classList.toggle("is-main", pos.isMain);
+
+      const isFocusMode = state.mode === "focus";
+      record.el.classList.toggle("has-catcher", !pos.isMain);
+      record.muteBtn.classList.toggle("hidden", isFocusMode);
+      record.hint.textContent = isFocusMode ? "Passer en principal" : "Agrandir en focus";
+
+      const desiredMuted = isFocusMode ? !pos.isMain : state.muted[name] !== false;
+      setPlayerMuted(name, desiredMuted);
+    }
+
+    if (handleBox) {
+      el.focusHandle.classList.add("visible");
+      el.focusHandle.classList.toggle("row", handleBox.orientation === "row");
+      el.focusHandle.classList.toggle("col", handleBox.orientation === "col");
+      el.focusHandle.style.left = `${Math.round(handleBox.x)}px`;
+      el.focusHandle.style.top = `${Math.round(handleBox.y)}px`;
+      el.focusHandle.style.width = `${Math.floor(handleBox.w)}px`;
+      el.focusHandle.style.height = `${Math.floor(handleBox.h)}px`;
+    } else {
+      el.focusHandle.classList.remove("visible");
     }
   }
 
@@ -371,17 +412,15 @@
   el.focusHandle.addEventListener("pointermove", (e) => {
     if (!dragging) return;
     const rect = el.stage.getBoundingClientRect();
-    const isRow = el.focusView.classList.contains("row");
+    const isRow = el.focusHandle.classList.contains("row");
     const frac = isRow
       ? (e.clientX - rect.left) / rect.width
       : (e.clientY - rect.top) / rect.height;
     dragFrac = clamp(MIN_MAIN_FRAC, frac, MAX_MAIN_FRAC);
-    const mainName = getMainName();
-    const others = state.channels.filter((c) => c !== mainName);
-    layoutFocus(mainName, others, dragFrac);
+    layoutAll(dragFrac);
   });
 
-  function endDrag(e) {
+  function endDrag() {
     if (!dragging) return;
     dragging = false;
     el.focusHandle.classList.remove("dragging");
@@ -393,47 +432,7 @@
   el.focusHandle.addEventListener("pointerup", endDrag);
   el.focusHandle.addEventListener("pointercancel", endDrag);
 
-  function getMainName() {
-    if (state.channels.includes(state.mainChannel)) return state.mainChannel;
-    return state.channels[0];
-  }
-
-  // ---- Top-level render ----
-
-  function keyFor() {
-    const mainName = getMainName();
-    return `${state.mode}|${state.channels.join(",")}|${mainName}`;
-  }
-
-  function render() {
-    const hasChannels = state.channels.length > 0;
-    el.emptyState.style.display = hasChannels ? "none" : "flex";
-    el.gridView.classList.toggle("active", hasChannels && state.mode === "grid");
-    el.focusView.classList.toggle("active", hasChannels && state.mode === "focus");
-
-    el.modeGrid.classList.toggle("active", state.mode === "grid");
-    el.modeFocus.classList.toggle("active", state.mode === "focus");
-
-    if (!hasChannels) {
-      builtKey = null;
-      return;
-    }
-
-    const key = keyFor();
-    const needsRebuild = key !== builtKey;
-
-    if (state.mode === "grid") {
-      if (needsRebuild) buildGrid();
-      layoutGrid();
-    } else {
-      const mainName = getMainName();
-      const others = state.channels.filter((c) => c !== mainName);
-      if (needsRebuild) buildFocus(mainName, others);
-      layoutFocus(mainName, others);
-    }
-
-    builtKey = key;
-  }
+  // ---- Wiring ----
 
   el.addForm.addEventListener("submit", (e) => {
     e.preventDefault();
@@ -447,19 +446,37 @@
   el.modeGrid.addEventListener("click", () => setMode("grid"));
   el.modeFocus.addEventListener("click", () => setMode("focus"));
 
-  el.toggleToolbar.addEventListener("click", () => {
-    el.toolbar.classList.toggle("collapsed");
-    el.toggleToolbar.textContent = el.toolbar.classList.contains("collapsed") ? "▸" : "▾";
+  el.fullscreenBtn.addEventListener("click", () => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch(() => {});
+    } else {
+      document.exitFullscreen();
+    }
   });
 
   let resizeTimer = null;
   const ro = new ResizeObserver(() => {
     clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(render, 60);
+    resizeTimer = setTimeout(() => layoutAll(), 60);
   });
   ro.observe(el.stage);
 
-  render();
+  // ---- Init ----
+
+  function init() {
+    for (const name of state.channels) {
+      createTile(name);
+    }
+    layoutAll();
+  }
+
+  if (window.Twitch && window.Twitch.Player) {
+    init();
+  } else {
+    // The embed SDK script tag is loaded before app.js in index.html, so
+    // this only matters if it's still parsing/executing.
+    window.addEventListener("load", init, { once: true });
+  }
 
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", () => {
