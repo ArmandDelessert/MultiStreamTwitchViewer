@@ -90,11 +90,11 @@
     badge.textContent = "PRINCIPAL";
     container.appendChild(badge);
 
+    // Invisible layer that intercepts every hover/click so Twitch's own
+    // overlay (which pauses/reacts on hover) never sees the mouse. Clicking
+    // it promotes the tile to the focus view when that makes sense.
     const catcher = document.createElement("div");
     catcher.className = "tileClickCatcher";
-    const hint = document.createElement("span");
-    hint.className = "tileHint";
-    catcher.appendChild(hint);
     catcher.addEventListener("click", () => {
       if (state.mode === "grid") {
         switchToFocus(name);
@@ -112,17 +112,6 @@
     nameEl.textContent = name;
     bar.appendChild(nameEl);
 
-    const actions = document.createElement("div");
-    actions.className = "tileActions";
-
-    const muteBtn = document.createElement("button");
-    muteBtn.className = "iconBtn muteBtn";
-    muteBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      toggleMute(name);
-    });
-    actions.appendChild(muteBtn);
-
     const removeBtn = document.createElement("button");
     removeBtn.className = "iconBtn danger";
     removeBtn.textContent = "✕";
@@ -131,10 +120,45 @@
       e.stopPropagation();
       removeChannel(name);
     });
-    actions.appendChild(removeBtn);
+    bar.appendChild(removeBtn);
 
-    bar.appendChild(actions);
     container.appendChild(bar);
+
+    // Bottom control strip: fullscreen / mute / play-pause, revealed on hover.
+    const controls = document.createElement("div");
+    controls.className = "tileControls";
+
+    const fullscreenTileBtn = document.createElement("button");
+    fullscreenTileBtn.className = "iconBtn";
+    fullscreenTileBtn.textContent = "⛶";
+    fullscreenTileBtn.title = "Plein écran";
+    fullscreenTileBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (document.fullscreenElement === container) {
+        document.exitFullscreen();
+      } else {
+        container.requestFullscreen().catch(() => {});
+      }
+    });
+    controls.appendChild(fullscreenTileBtn);
+
+    const muteBtn = document.createElement("button");
+    muteBtn.className = "iconBtn muteBtn";
+    muteBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleMute(name);
+    });
+    controls.appendChild(muteBtn);
+
+    const playPauseBtn = document.createElement("button");
+    playPauseBtn.className = "iconBtn playPauseBtn";
+    playPauseBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      togglePlayback(name);
+    });
+    controls.appendChild(playPauseBtn);
+
+    container.appendChild(controls);
 
     el.tilesLayer.appendChild(container);
 
@@ -162,9 +186,10 @@
       mount.appendChild(iframe);
     }
 
-    const record = { el: container, player, muteBtn, hint };
+    const record = { el: container, player, muteBtn, playPauseBtn, catcher, playing: true };
     tiles.set(name, record);
     updateMuteButton(name);
+    updatePlayPauseButton(name);
     return record;
   }
 
@@ -207,9 +232,46 @@
     state.muted[name] = !(state.muted[name] !== false);
     saveState();
     updateMuteButton(name);
-    if (state.mode === "grid") {
-      setPlayerMuted(name, state.muted[name] !== false);
+    setPlayerMuted(name, state.muted[name] !== false);
+  }
+
+  function updatePlayPauseButton(name) {
+    const record = tiles.get(name);
+    if (!record) return;
+    record.playPauseBtn.textContent = record.playing ? "⏸" : "▶";
+    record.playPauseBtn.title = record.playing ? "Mettre en pause" : "Lancer la lecture";
+  }
+
+  function togglePlayback(name) {
+    const record = tiles.get(name);
+    if (!record || !record.player) return;
+    try {
+      if (record.playing) {
+        record.player.pause();
+      } else {
+        record.player.play();
+      }
+    } catch (e) {
+      /* ignore */
     }
+    record.playing = !record.playing;
+    updatePlayPauseButton(name);
+  }
+
+  // Sets who the (unmuted) main channel is, muting the previous one back —
+  // only called on an explicit promotion, never on resize/relayout, so a
+  // manual mute/unmute elsewhere is never fought over.
+  function promoteMain(name) {
+    const previous = state.mainChannel;
+    state.mainChannel = name;
+    state.muted[name] = false;
+    if (previous && previous !== name) {
+      state.muted[previous] = true;
+      updateMuteButton(previous);
+      setPlayerMuted(previous, true);
+    }
+    updateMuteButton(name);
+    setPlayerMuted(name, false);
   }
 
   // ---- State mutations ----
@@ -226,7 +288,13 @@
       }
     }
     if (added) {
-      if (!state.mainChannel) state.mainChannel = state.channels[0];
+      if (!state.mainChannel) {
+        if (state.mode === "focus") {
+          promoteMain(state.channels[0]);
+        } else {
+          state.mainChannel = state.channels[0];
+        }
+      }
       saveState();
       layoutAll();
     }
@@ -237,7 +305,12 @@
     delete state.muted[name];
     destroyTile(name);
     if (state.mainChannel === name) {
-      state.mainChannel = state.channels[0] || null;
+      const next = state.channels[0] || null;
+      if (next && state.mode === "focus") {
+        promoteMain(next);
+      } else {
+        state.mainChannel = next;
+      }
     }
     saveState();
     layoutAll();
@@ -245,8 +318,8 @@
 
   function setMode(mode) {
     state.mode = mode;
-    if (mode === "focus" && !state.mainChannel && state.channels.length) {
-      state.mainChannel = state.channels[0];
+    if (mode === "focus" && !getMainName() && state.channels.length) {
+      promoteMain(state.channels[0]);
     }
     saveState();
     el.modeGrid.classList.toggle("active", state.mode === "grid");
@@ -255,14 +328,14 @@
   }
 
   function setMain(name) {
-    state.mainChannel = name;
+    promoteMain(name);
     saveState();
     layoutAll();
   }
 
   function switchToFocus(name) {
     state.mode = "focus";
-    state.mainChannel = name;
+    promoteMain(name);
     saveState();
     el.modeGrid.classList.toggle("active", false);
     el.modeFocus.classList.toggle("active", true);
@@ -373,14 +446,14 @@
       record.el.style.width = `${Math.floor(pos.w)}px`;
       record.el.style.height = `${Math.floor(pos.h)}px`;
       record.el.classList.toggle("is-main", pos.isMain);
-
-      const isFocusMode = state.mode === "focus";
-      record.el.classList.toggle("has-catcher", !pos.isMain);
-      record.muteBtn.classList.toggle("hidden", isFocusMode);
-      record.hint.textContent = isFocusMode ? "Passer en principal" : "Agrandir en focus";
-
-      const desiredMuted = isFocusMode ? !pos.isMain : state.muted[name] !== false;
-      setPlayerMuted(name, desiredMuted);
+      // The click-catcher only does something for tiles that aren't already
+      // the interactive main video; it still gets a title tooltip there for
+      // discoverability, and the tile itself gets a "clickable" hover cue.
+      const isPromotable = state.mode === "grid" || !pos.isMain;
+      record.el.classList.toggle("clickable", isPromotable);
+      record.catcher.title = isPromotable
+        ? (state.mode === "grid" ? "Agrandir en focus" : "Passer en principal")
+        : "";
     }
 
     if (handleBox) {
@@ -464,6 +537,8 @@
   // ---- Init ----
 
   function init() {
+    el.modeGrid.classList.toggle("active", state.mode === "grid");
+    el.modeFocus.classList.toggle("active", state.mode === "focus");
     for (const name of state.channels) {
       createTile(name);
     }
