@@ -24,7 +24,7 @@
     toolbar: document.getElementById("toolbar"),
   };
 
-  // channel -> { el, player, muteBtn, hintEl }. A tile is created once when
+  // channel -> { el, player, muteBtn, playPauseBtn, nameEl, playing }. A tile is created once when
   // a channel is added and lives until it's removed — switching modes or
   // resizing only ever repositions these elements, never recreates the
   // underlying Twitch player/iframe.
@@ -90,26 +90,34 @@
     badge.textContent = "PRINCIPAL";
     container.appendChild(badge);
 
-    // Invisible layer that intercepts every hover/click so Twitch's own
-    // overlay (which pauses/reacts on hover) never sees the mouse. Clicking
-    // it promotes the tile to the focus view when that makes sense.
-    const catcher = document.createElement("div");
-    catcher.className = "tileClickCatcher";
-    catcher.addEventListener("click", () => {
+    const bar = document.createElement("div");
+    bar.className = "tileBar";
+
+    // Drag handle: pointer capture means dragging works even while the
+    // cursor passes over other tiles' cross-origin Twitch iframes, which
+    // would otherwise swallow the mouse events entirely.
+    const gripBtn = document.createElement("button");
+    gripBtn.className = "iconBtn gripBtn";
+    gripBtn.textContent = "⠿";
+    gripBtn.title = "Glisser pour réorganiser";
+    gripBtn.addEventListener("pointerdown", (e) => {
+      e.stopPropagation();
+      startDragReorder(name, e);
+    });
+    bar.appendChild(gripBtn);
+
+    const nameEl = document.createElement("div");
+    nameEl.className = "tileName";
+    nameEl.textContent = name;
+    nameEl.title = "";
+    nameEl.addEventListener("click", (e) => {
+      e.stopPropagation();
       if (state.mode === "grid") {
         switchToFocus(name);
       } else if (state.mode === "focus" && name !== getMainName()) {
         setMain(name);
       }
     });
-    container.appendChild(catcher);
-
-    const bar = document.createElement("div");
-    bar.className = "tileBar";
-
-    const nameEl = document.createElement("div");
-    nameEl.className = "tileName";
-    nameEl.textContent = name;
     bar.appendChild(nameEl);
 
     const removeBtn = document.createElement("button");
@@ -186,7 +194,7 @@
       mount.appendChild(iframe);
     }
 
-    const record = { el: container, player, muteBtn, playPauseBtn, catcher, playing: true };
+    const record = { el: container, player, muteBtn, playPauseBtn, nameEl, playing: true };
     tiles.set(name, record);
     updateMuteButton(name);
     updatePlayPauseButton(name);
@@ -446,12 +454,11 @@
       record.el.style.width = `${Math.floor(pos.w)}px`;
       record.el.style.height = `${Math.floor(pos.h)}px`;
       record.el.classList.toggle("is-main", pos.isMain);
-      // The click-catcher only does something for tiles that aren't already
-      // the interactive main video; it still gets a title tooltip there for
-      // discoverability, and the tile itself gets a "clickable" hover cue.
+      // Clicking the channel name promotes a tile, except for the tile
+      // that's already the interactive main video.
       const isPromotable = state.mode === "grid" || !pos.isMain;
-      record.el.classList.toggle("clickable", isPromotable);
-      record.catcher.title = isPromotable
+      record.nameEl.classList.toggle("clickable", isPromotable);
+      record.nameEl.title = isPromotable
         ? (state.mode === "grid" ? "Agrandir en focus" : "Passer en principal")
         : "";
     }
@@ -504,6 +511,54 @@
   }
   el.focusHandle.addEventListener("pointerup", endDrag);
   el.focusHandle.addEventListener("pointercancel", endDrag);
+
+  // ---- Drag to reorder tiles ----
+
+  let reorderSource = null;
+  let reorderTarget = null;
+
+  function startDragReorder(name, downEvent) {
+    reorderSource = name;
+    reorderTarget = null;
+    const grip = downEvent.currentTarget;
+    tiles.get(name)?.el.classList.add("drag-source");
+
+    const onMove = (e) => {
+      const el2 = document.elementFromPoint(e.clientX, e.clientY);
+      const tileEl = el2 && el2.closest(".tile");
+      const targetName = tileEl && tileEl.dataset.channel;
+      if (targetName !== reorderTarget) {
+        if (reorderTarget) tiles.get(reorderTarget)?.el.classList.remove("drag-target");
+        reorderTarget = targetName && targetName !== reorderSource ? targetName : null;
+        if (reorderTarget) tiles.get(reorderTarget)?.el.classList.add("drag-target");
+      }
+    };
+
+    const onUp = () => {
+      grip.releasePointerCapture(downEvent.pointerId);
+      grip.removeEventListener("pointermove", onMove);
+      grip.removeEventListener("pointerup", onUp);
+      grip.removeEventListener("pointercancel", onUp);
+      tiles.get(reorderSource)?.el.classList.remove("drag-source");
+      if (reorderTarget) {
+        tiles.get(reorderTarget)?.el.classList.remove("drag-target");
+        const i = state.channels.indexOf(reorderSource);
+        const j = state.channels.indexOf(reorderTarget);
+        if (i !== -1 && j !== -1) {
+          [state.channels[i], state.channels[j]] = [state.channels[j], state.channels[i]];
+          saveState();
+          layoutAll();
+        }
+      }
+      reorderSource = null;
+      reorderTarget = null;
+    };
+
+    grip.setPointerCapture(downEvent.pointerId);
+    grip.addEventListener("pointermove", onMove);
+    grip.addEventListener("pointerup", onUp);
+    grip.addEventListener("pointercancel", onUp);
+  }
 
   // ---- Wiring ----
 

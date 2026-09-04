@@ -189,18 +189,11 @@ body {
   display: block;
 }
 
-/* Fully invisible layer that intercepts every hover/click on the tile so
-   Twitch's own overlay (which pauses/reacts on hover) never sees the
-   mouse. Only shows a subtle "this is clickable" ring, no dark veil. */
-.tileClickCatcher {
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  cursor: default;
+.tile.drag-source {
+  opacity: 0.4;
 }
-.tile.clickable .tileClickCatcher { cursor: pointer; }
-.tile.clickable:hover {
-  box-shadow: inset 0 0 0 2px var(--accent);
+.tile.drag-target {
+  box-shadow: inset 0 0 0 3px var(--accent);
 }
 
 .tileBar {
@@ -231,7 +224,17 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1;
+  min-width: 0;
 }
+.tileName.clickable { cursor: pointer; }
+.tileName.clickable:hover { text-decoration: underline; }
+
+.gripBtn {
+  cursor: grab;
+  flex: 0 0 auto;
+}
+.gripBtn:active { cursor: grabbing; }
 
 /* Bottom control strip: fullscreen / mute / play-pause, hover-only. */
 .tileControls {
