@@ -90,8 +90,13 @@
     badge.textContent = "PRINCIPAL";
     container.appendChild(badge);
 
+    // Everything lives in a top overlay so nothing ever sits on top of
+    // Twitch's own control bar at the bottom of the player.
     const bar = document.createElement("div");
     bar.className = "tileBar";
+
+    const topRow = document.createElement("div");
+    topRow.className = "tileBarRow";
 
     // Drag handle: pointer capture means dragging works even while the
     // cursor passes over other tiles' cross-origin Twitch iframes, which
@@ -104,21 +109,12 @@
       e.stopPropagation();
       startDragReorder(name, e);
     });
-    bar.appendChild(gripBtn);
+    topRow.appendChild(gripBtn);
 
     const nameEl = document.createElement("div");
     nameEl.className = "tileName";
     nameEl.textContent = name;
-    nameEl.title = "";
-    nameEl.addEventListener("click", (e) => {
-      e.stopPropagation();
-      if (state.mode === "grid") {
-        switchToFocus(name);
-      } else if (state.mode === "focus" && name !== getMainName()) {
-        setMain(name);
-      }
-    });
-    bar.appendChild(nameEl);
+    topRow.appendChild(nameEl);
 
     const removeBtn = document.createElement("button");
     removeBtn.className = "iconBtn danger";
@@ -128,13 +124,25 @@
       e.stopPropagation();
       removeChannel(name);
     });
-    bar.appendChild(removeBtn);
+    topRow.appendChild(removeBtn);
 
-    container.appendChild(bar);
+    bar.appendChild(topRow);
 
-    // Bottom control strip: fullscreen / mute / play-pause, revealed on hover.
-    const controls = document.createElement("div");
-    controls.className = "tileControls";
+    const actionsRow = document.createElement("div");
+    actionsRow.className = "tileBarRow tileActionsRow";
+
+    const promoteBtn = document.createElement("button");
+    promoteBtn.className = "iconBtn promoteBtn";
+    promoteBtn.textContent = "⭐";
+    promoteBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (state.mode === "grid") {
+        switchToFocus(name);
+      } else if (state.mode === "focus" && name !== getMainName()) {
+        setMain(name);
+      }
+    });
+    actionsRow.appendChild(promoteBtn);
 
     const fullscreenTileBtn = document.createElement("button");
     fullscreenTileBtn.className = "iconBtn";
@@ -148,7 +156,7 @@
         container.requestFullscreen().catch(() => {});
       }
     });
-    controls.appendChild(fullscreenTileBtn);
+    actionsRow.appendChild(fullscreenTileBtn);
 
     const muteBtn = document.createElement("button");
     muteBtn.className = "iconBtn muteBtn";
@@ -156,7 +164,7 @@
       e.stopPropagation();
       toggleMute(name);
     });
-    controls.appendChild(muteBtn);
+    actionsRow.appendChild(muteBtn);
 
     const playPauseBtn = document.createElement("button");
     playPauseBtn.className = "iconBtn playPauseBtn";
@@ -164,9 +172,10 @@
       e.stopPropagation();
       togglePlayback(name);
     });
-    controls.appendChild(playPauseBtn);
+    actionsRow.appendChild(playPauseBtn);
 
-    container.appendChild(controls);
+    bar.appendChild(actionsRow);
+    container.appendChild(bar);
 
     el.tilesLayer.appendChild(container);
 
@@ -194,7 +203,7 @@
       mount.appendChild(iframe);
     }
 
-    const record = { el: container, player, muteBtn, playPauseBtn, nameEl, playing: true };
+    const record = { el: container, player, muteBtn, playPauseBtn, promoteBtn, playing: true };
     tiles.set(name, record);
     updateMuteButton(name);
     updatePlayPauseButton(name);
@@ -237,10 +246,22 @@
   }
 
   function toggleMute(name) {
-    state.muted[name] = !(state.muted[name] !== false);
-    saveState();
+    const wasMuted = state.muted[name] !== false;
+    state.muted[name] = !wasMuted;
     updateMuteButton(name);
     setPlayerMuted(name, state.muted[name] !== false);
+
+    // In grid mode only one stream should ever have audio at a time.
+    if (state.mode === "grid" && wasMuted) {
+      for (const other of state.channels) {
+        if (other !== name && state.muted[other] === false) {
+          state.muted[other] = true;
+          updateMuteButton(other);
+          setPlayerMuted(other, true);
+        }
+      }
+    }
+    saveState();
   }
 
   function updatePlayPauseButton(name) {
@@ -266,18 +287,20 @@
     updatePlayPauseButton(name);
   }
 
-  // Sets who the (unmuted) main channel is, muting the previous one back —
+  // Sets who the (unmuted) main channel is, muting every other channel —
   // only called on an explicit promotion, never on resize/relayout, so a
-  // manual mute/unmute elsewhere is never fought over.
+  // manual mute/unmute elsewhere is never fought over otherwise.
   function promoteMain(name) {
-    const previous = state.mainChannel;
     state.mainChannel = name;
-    state.muted[name] = false;
-    if (previous && previous !== name) {
-      state.muted[previous] = true;
-      updateMuteButton(previous);
-      setPlayerMuted(previous, true);
+    for (const other of state.channels) {
+      if (other === name) continue;
+      if (state.muted[other] !== true) {
+        state.muted[other] = true;
+        updateMuteButton(other);
+        setPlayerMuted(other, true);
+      }
     }
+    state.muted[name] = false;
     updateMuteButton(name);
     setPlayerMuted(name, false);
   }
@@ -402,6 +425,16 @@
     return Math.max(min, Math.min(max, val));
   }
 
+  // Quantizes the drag to a handful of evenly spaced notches instead of a
+  // free continuous position, so the split always lands on a "clean"
+  // sidebar arrangement rather than an arbitrary in-between size.
+  function snapFrac(rawFrac, otherCount) {
+    const steps = clamp(1, otherCount, 6);
+    const stepSize = (MAX_MAIN_FRAC - MIN_MAIN_FRAC) / steps;
+    const snapped = MIN_MAIN_FRAC + Math.round((rawFrac - MIN_MAIN_FRAC) / stepSize) * stepSize;
+    return clamp(MIN_MAIN_FRAC, snapped, MAX_MAIN_FRAC);
+  }
+
   function layoutAll(overrideFrac) {
     const hasChannels = state.channels.length > 0;
     el.emptyState.style.display = hasChannels ? "none" : "flex";
@@ -454,13 +487,11 @@
       record.el.style.width = `${Math.floor(pos.w)}px`;
       record.el.style.height = `${Math.floor(pos.h)}px`;
       record.el.classList.toggle("is-main", pos.isMain);
-      // Clicking the channel name promotes a tile, except for the tile
-      // that's already the interactive main video.
+      // The promote button does nothing for the tile that's already the
+      // interactive main video — hide it there instead of leaving a dead button.
       const isPromotable = state.mode === "grid" || !pos.isMain;
-      record.nameEl.classList.toggle("clickable", isPromotable);
-      record.nameEl.title = isPromotable
-        ? (state.mode === "grid" ? "Agrandir en focus" : "Passer en principal")
-        : "";
+      record.promoteBtn.classList.toggle("hidden", !isPromotable);
+      record.promoteBtn.title = state.mode === "grid" ? "Agrandir en focus" : "Passer en principal";
     }
 
     if (handleBox) {
@@ -493,10 +524,11 @@
     if (!dragging) return;
     const rect = el.stage.getBoundingClientRect();
     const isRow = el.focusHandle.classList.contains("row");
-    const frac = isRow
+    const rawFrac = isRow
       ? (e.clientX - rect.left) / rect.width
       : (e.clientY - rect.top) / rect.height;
-    dragFrac = clamp(MIN_MAIN_FRAC, frac, MAX_MAIN_FRAC);
+    const otherCount = Math.max(0, state.channels.length - 1);
+    dragFrac = snapFrac(clamp(MIN_MAIN_FRAC, rawFrac, MAX_MAIN_FRAC), otherCount);
     layoutAll(dragFrac);
   });
 

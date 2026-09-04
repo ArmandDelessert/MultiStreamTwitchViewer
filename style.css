@@ -196,16 +196,19 @@ body {
   box-shadow: inset 0 0 0 3px var(--accent);
 }
 
+/* Everything (name, drag handle, remove, and the action buttons) lives in
+   this top overlay, on purpose: it never overlaps Twitch's own control bar
+   at the bottom of the player, so their native buttons stay clickable. */
 .tileBar {
   position: absolute;
   top: 0;
   left: 0;
   right: 0;
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 4px 8px;
-  background: linear-gradient(to bottom, rgba(0,0,0,0.75), transparent);
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 8px 8px;
+  background: linear-gradient(to bottom, rgba(0,0,0,0.8), transparent);
   opacity: 0;
   transition: opacity 0.15s ease;
   pointer-events: none;
@@ -214,6 +217,12 @@ body {
 .tile:hover .tileBar {
   opacity: 1;
   pointer-events: auto;
+}
+
+.tileBarRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .tileName {
@@ -227,35 +236,12 @@ body {
   flex: 1;
   min-width: 0;
 }
-.tileName.clickable { cursor: pointer; }
-.tileName.clickable:hover { text-decoration: underline; }
 
 .gripBtn {
   cursor: grab;
   flex: 0 0 auto;
 }
 .gripBtn:active { cursor: grabbing; }
-
-/* Bottom control strip: fullscreen / mute / play-pause, hover-only. */
-.tileControls {
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  display: flex;
-  justify-content: center;
-  gap: 6px;
-  padding: 6px 8px;
-  background: linear-gradient(to top, rgba(0,0,0,0.75), transparent);
-  opacity: 0;
-  transition: opacity 0.15s ease;
-  pointer-events: none;
-  z-index: 2;
-}
-.tile:hover .tileControls {
-  opacity: 1;
-  pointer-events: auto;
-}
 
 .iconBtn {
   background: rgba(24,24,27,0.85);
@@ -270,10 +256,12 @@ body {
   cursor: pointer;
   font-size: 0.8rem;
   line-height: 1;
+  flex: 0 0 auto;
 }
 .iconBtn:hover { background: var(--accent); }
 .iconBtn.danger:hover { background: var(--danger); }
 .iconBtn.muted { color: var(--danger); }
+.iconBtn.hidden { display: none; }
 
 .mainBadge {
   position: absolute;
