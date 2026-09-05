@@ -22,6 +22,8 @@
     fullscreenBtn: document.getElementById("fullscreenBtn"),
     pauseAllBtn: document.getElementById("pauseAllBtn"),
     muteAllBtn: document.getElementById("muteAllBtn"),
+    resyncAllBtn: document.getElementById("resyncAllBtn"),
+    qualitySelect: document.getElementById("qualitySelect"),
     toolbar: document.getElementById("toolbar"),
   };
 
@@ -59,12 +61,13 @@
           zoneA,
           muted: parsed.muted && typeof parsed.muted === "object" ? parsed.muted : {},
           splitNotch,
+          quality: typeof parsed.quality === "string" ? parsed.quality : "auto",
         };
       }
     } catch (e) {
       console.warn("Failed to load state", e);
     }
-    return { channels: [], mode: "grid", zoneA: [], muted: {}, splitNotch: { side: "a", lines: 1 } };
+    return { channels: [], mode: "grid", zoneA: [], muted: {}, splitNotch: { side: "a", lines: 1 }, quality: "auto" };
   }
 
   function saveState() {
@@ -184,16 +187,6 @@
     nameEl.textContent = name;
     row.appendChild(nameEl);
 
-    const bufferBtn = document.createElement("button");
-    bufferBtn.className = "iconBtn";
-    bufferBtn.textContent = "⏩";
-    bufferBtn.title = "Rattraper le direct (réduire le décalage)";
-    bufferBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      resyncToLive(name);
-    });
-    row.appendChild(bufferBtn);
-
     const removeBtn = document.createElement("button");
     removeBtn.className = "iconBtn danger";
     removeBtn.textContent = "✕";
@@ -243,6 +236,11 @@
           record.playing = false;
           updatePauseAllButton();
         });
+        if (state.quality !== "auto") {
+          player.addEventListener(window.Twitch.Player.READY, () => {
+            setPlayerQuality(name, state.quality);
+          });
+        }
       } catch (e) {
         /* ignore */
       }
@@ -295,12 +293,25 @@
   // reaching into the player's own <video> element (which we can't do:
   // player.twitch.tv is a cross-origin iframe, even though it's Twitch's
   // own domain). Seeking past the end of the seekable range is how HTML5
-  // live players commonly expose "jump to live".
-  function resyncToLive(name) {
+  // live players commonly expose "jump to live". Applied to every stream
+  // at once from the toolbar button.
+  function resyncAllToLive() {
+    for (const record of tiles.values()) {
+      try {
+        record.player?.seek(1e10);
+      } catch (e) {
+        /* ignore */
+      }
+    }
+  }
+
+  function setPlayerQuality(name, quality) {
     const record = tiles.get(name);
-    if (!record || !record.player) return;
+    if (!record) return;
     try {
-      record.player.seek(1e10);
+      if (record.player && typeof record.player.setQuality === "function") {
+        record.player.setQuality(quality);
+      }
     } catch (e) {
       /* ignore */
     }
@@ -380,6 +391,16 @@
       setPlayerMuted(name, true);
     }
     saveState();
+  });
+
+  el.resyncAllBtn.addEventListener("click", resyncAllToLive);
+
+  el.qualitySelect.addEventListener("change", () => {
+    state.quality = el.qualitySelect.value;
+    saveState();
+    for (const name of state.channels) {
+      setPlayerQuality(name, state.quality);
+    }
   });
 
   // ---- State mutations ----
@@ -914,6 +935,7 @@
 
   function init() {
     updateModeButtons();
+    el.qualitySelect.value = state.quality;
     for (const name of state.channels) {
       createTile(name);
     }

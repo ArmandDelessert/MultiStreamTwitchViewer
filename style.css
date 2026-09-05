@@ -110,6 +110,7 @@ body {
 }
 
 .globalActions button,
+.globalActions select,
 #fullscreenBtn {
   background: var(--panel-2);
   border: 1px solid var(--border);
@@ -121,7 +122,12 @@ body {
   font-weight: 600;
   white-space: nowrap;
 }
+.globalActions select {
+  font-weight: 500;
+  color: var(--text);
+}
 .globalActions button:hover,
+.globalActions select:hover,
 #fullscreenBtn:hover { color: var(--text); border-color: var(--accent); }
 .globalActions button:disabled {
   opacity: 0.5;
