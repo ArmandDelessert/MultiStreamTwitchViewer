@@ -4,11 +4,10 @@
   const RATIO = 16 / 9;
   const GAP = 8;
   const HANDLE_SIZE = 8;
+  const MIN_SIDE = 80; // minimal room reserved for the sidebar when the main video is at its maximal size
   const STORAGE_KEY = "twitchMultiView.state.v1";
-  const MIN_MAIN_FRAC = 0.25;
-  const MAX_MAIN_FRAC = 0.8;
 
-  /** @type {{channels: string[], mode: "grid"|"focus", mainChannel: string|null, muted: Record<string, boolean>, focusMainFrac: number}} */
+  /** @type {{channels: string[], mode: "grid"|"focus", mainChannel: string|null, muted: Record<string, boolean>, focusLayoutOption: number}} */
   let state = loadState();
 
   const el = {
@@ -21,12 +20,14 @@
     modeGrid: document.getElementById("modeGrid"),
     modeFocus: document.getElementById("modeFocus"),
     fullscreenBtn: document.getElementById("fullscreenBtn"),
+    pauseAllBtn: document.getElementById("pauseAllBtn"),
+    muteAllBtn: document.getElementById("muteAllBtn"),
     toolbar: document.getElementById("toolbar"),
   };
 
-  // channel -> { el, player, muteBtn, playPauseBtn, nameEl, playing }. A tile is created once when
-  // a channel is added and lives until it's removed — switching modes or
-  // resizing only ever repositions these elements, never recreates the
+  // channel -> { el, player, playing, promoteBtn }. A tile is created once
+  // when a channel is added and lives until it's removed — switching modes
+  // or resizing only ever repositions these elements, never recreates the
   // underlying Twitch player/iframe.
   const tiles = new Map();
 
@@ -40,13 +41,13 @@
           mode: parsed.mode === "focus" ? "focus" : "grid",
           mainChannel: parsed.mainChannel || null,
           muted: parsed.muted && typeof parsed.muted === "object" ? parsed.muted : {},
-          focusMainFrac: typeof parsed.focusMainFrac === "number" ? parsed.focusMainFrac : 0.62,
+          focusLayoutOption: Number.isInteger(parsed.focusLayoutOption) ? parsed.focusLayoutOption : 0,
         };
       }
     } catch (e) {
       console.warn("Failed to load state", e);
     }
-    return { channels: [], mode: "grid", mainChannel: null, muted: {}, focusMainFrac: 0.62 };
+    return { channels: [], mode: "grid", mainChannel: null, muted: {}, focusLayoutOption: 0 };
   }
 
   function saveState() {
@@ -95,8 +96,8 @@
     const bar = document.createElement("div");
     bar.className = "tileBar";
 
-    const topRow = document.createElement("div");
-    topRow.className = "tileBarRow";
+    const row = document.createElement("div");
+    row.className = "tileBarRow";
 
     // Drag handle: pointer capture means dragging works even while the
     // cursor passes over other tiles' cross-origin Twitch iframes, which
@@ -109,27 +110,7 @@
       e.stopPropagation();
       startDragReorder(name, e);
     });
-    topRow.appendChild(gripBtn);
-
-    const nameEl = document.createElement("div");
-    nameEl.className = "tileName";
-    nameEl.textContent = name;
-    topRow.appendChild(nameEl);
-
-    const removeBtn = document.createElement("button");
-    removeBtn.className = "iconBtn danger";
-    removeBtn.textContent = "✕";
-    removeBtn.title = "Retirer";
-    removeBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      removeChannel(name);
-    });
-    topRow.appendChild(removeBtn);
-
-    bar.appendChild(topRow);
-
-    const actionsRow = document.createElement("div");
-    actionsRow.className = "tileBarRow tileActionsRow";
+    row.appendChild(gripBtn);
 
     const promoteBtn = document.createElement("button");
     promoteBtn.className = "iconBtn promoteBtn";
@@ -142,46 +123,33 @@
         setMain(name);
       }
     });
-    actionsRow.appendChild(promoteBtn);
+    row.appendChild(promoteBtn);
 
-    const fullscreenTileBtn = document.createElement("button");
-    fullscreenTileBtn.className = "iconBtn";
-    fullscreenTileBtn.textContent = "⛶";
-    fullscreenTileBtn.title = "Plein écran";
-    fullscreenTileBtn.addEventListener("click", (e) => {
+    const nameEl = document.createElement("div");
+    nameEl.className = "tileName";
+    nameEl.textContent = name;
+    row.appendChild(nameEl);
+
+    const removeBtn = document.createElement("button");
+    removeBtn.className = "iconBtn danger";
+    removeBtn.textContent = "✕";
+    removeBtn.title = "Retirer";
+    removeBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      if (document.fullscreenElement === container) {
-        document.exitFullscreen();
-      } else {
-        container.requestFullscreen().catch(() => {});
-      }
+      removeChannel(name);
     });
-    actionsRow.appendChild(fullscreenTileBtn);
+    row.appendChild(removeBtn);
 
-    const muteBtn = document.createElement("button");
-    muteBtn.className = "iconBtn muteBtn";
-    muteBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      toggleMute(name);
-    });
-    actionsRow.appendChild(muteBtn);
-
-    const playPauseBtn = document.createElement("button");
-    playPauseBtn.className = "iconBtn playPauseBtn";
-    playPauseBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      togglePlayback(name);
-    });
-    actionsRow.appendChild(playPauseBtn);
-
-    bar.appendChild(actionsRow);
+    bar.appendChild(row);
     container.appendChild(bar);
 
     el.tilesLayer.appendChild(container);
 
-    let player = null;
+    const record = { el: container, player: null, playing: true, promoteBtn };
+    tiles.set(name, record);
+
     if (window.Twitch && window.Twitch.Player) {
-      player = new window.Twitch.Player(mount.id, {
+      const player = new window.Twitch.Player(mount.id, {
         width: "100%",
         height: "100%",
         channel: name,
@@ -189,6 +157,19 @@
         muted: true,
         autoplay: true,
       });
+      record.player = player;
+      try {
+        player.addEventListener(window.Twitch.Player.PLAY, () => {
+          record.playing = true;
+          updatePauseAllButton();
+        });
+        player.addEventListener(window.Twitch.Player.PAUSE, () => {
+          record.playing = false;
+          updatePauseAllButton();
+        });
+      } catch (e) {
+        /* ignore */
+      }
     } else {
       console.warn("Twitch embed SDK not available; falling back to iframe for", name);
       const iframe = document.createElement("iframe");
@@ -203,10 +184,7 @@
       mount.appendChild(iframe);
     }
 
-    const record = { el: container, player, muteBtn, playPauseBtn, promoteBtn, playing: true };
-    tiles.set(name, record);
-    updateMuteButton(name);
-    updatePlayPauseButton(name);
+    updatePauseAllButton();
     return record;
   }
 
@@ -222,6 +200,7 @@
     }
     record.el.remove();
     tiles.delete(name);
+    updatePauseAllButton();
   }
 
   function setPlayerMuted(name, muted) {
@@ -236,57 +215,6 @@
     }
   }
 
-  function updateMuteButton(name) {
-    const record = tiles.get(name);
-    if (!record) return;
-    const muted = state.muted[name] !== false;
-    record.muteBtn.classList.toggle("muted", muted);
-    record.muteBtn.textContent = muted ? "🔇" : "🔊";
-    record.muteBtn.title = muted ? "Activer le son" : "Couper le son";
-  }
-
-  function toggleMute(name) {
-    const wasMuted = state.muted[name] !== false;
-    state.muted[name] = !wasMuted;
-    updateMuteButton(name);
-    setPlayerMuted(name, state.muted[name] !== false);
-
-    // In grid mode only one stream should ever have audio at a time.
-    if (state.mode === "grid" && wasMuted) {
-      for (const other of state.channels) {
-        if (other !== name && state.muted[other] === false) {
-          state.muted[other] = true;
-          updateMuteButton(other);
-          setPlayerMuted(other, true);
-        }
-      }
-    }
-    saveState();
-  }
-
-  function updatePlayPauseButton(name) {
-    const record = tiles.get(name);
-    if (!record) return;
-    record.playPauseBtn.textContent = record.playing ? "⏸" : "▶";
-    record.playPauseBtn.title = record.playing ? "Mettre en pause" : "Lancer la lecture";
-  }
-
-  function togglePlayback(name) {
-    const record = tiles.get(name);
-    if (!record || !record.player) return;
-    try {
-      if (record.playing) {
-        record.player.pause();
-      } else {
-        record.player.play();
-      }
-    } catch (e) {
-      /* ignore */
-    }
-    record.playing = !record.playing;
-    updatePlayPauseButton(name);
-  }
-
   // Sets who the (unmuted) main channel is, muting every other channel —
   // only called on an explicit promotion, never on resize/relayout, so a
   // manual mute/unmute elsewhere is never fought over otherwise.
@@ -296,14 +224,51 @@
       if (other === name) continue;
       if (state.muted[other] !== true) {
         state.muted[other] = true;
-        updateMuteButton(other);
         setPlayerMuted(other, true);
       }
     }
     state.muted[name] = false;
-    updateMuteButton(name);
     setPlayerMuted(name, false);
   }
+
+  // ---- Global controls (toolbar) ----
+
+  function anyPlaying() {
+    for (const record of tiles.values()) {
+      if (record.playing) return true;
+    }
+    return false;
+  }
+
+  function updatePauseAllButton() {
+    const playing = anyPlaying();
+    el.pauseAllBtn.textContent = playing ? "⏸ Tout mettre en pause" : "▶ Tout lancer";
+    el.pauseAllBtn.title = playing
+      ? "Mettre tous les streams en pause"
+      : "Lancer la lecture de tous les streams";
+  }
+
+  el.pauseAllBtn.addEventListener("click", () => {
+    const shouldPause = anyPlaying();
+    for (const record of tiles.values()) {
+      try {
+        if (shouldPause) record.player?.pause();
+        else record.player?.play();
+      } catch (e) {
+        /* ignore */
+      }
+      record.playing = !shouldPause;
+    }
+    updatePauseAllButton();
+  });
+
+  el.muteAllBtn.addEventListener("click", () => {
+    for (const name of state.channels) {
+      state.muted[name] = true;
+      setPlayerMuted(name, true);
+    }
+    saveState();
+  });
 
   // ---- State mutations ----
 
@@ -397,10 +362,12 @@
     return best;
   }
 
-  // Lays out `names` inside a box (boxX,boxY,boxW,boxH), centering the
-  // whole block and centering each (possibly partial) row within it —
-  // matching how a wrapping flex row with justify-content:center looks.
-  function packGrid(names, boxX, boxY, boxW, boxH, positions, isMainFlag) {
+  // Lays out `names` inside a box (boxX,boxY,boxW,boxH), maximizing each
+  // tile's area, centering the whole block and centering each (possibly
+  // partial) row within it — matching how a wrapping flex row with
+  // justify-content:center looks. Used for grid mode and for the focus
+  // sidebar when the main video is at its maximal size.
+  function packGrid(names, boxX, boxY, boxW, boxH, positions) {
     const n = names.length;
     if (n === 0) return;
     const { cols, rows, w, h } = computeGrid(n, boxW, boxH, RATIO, GAP);
@@ -417,25 +384,106 @@
       const rowOffsetX = offsetX + (totalW - rowW) / 2;
       const x = rowOffsetX + col * (w + GAP);
       const y = offsetY + row * (h + GAP);
-      positions.set(name, { x, y, w, h, isMain: !!isMainFlag });
+      positions.set(name, { x, y, w, h, isMain: false });
     });
+  }
+
+  // Lays out `names` in exactly `cols` columns filling the full box height —
+  // used for the focus sidebar when the user has picked a specific column
+  // count (row orientation: main left, sidebar right).
+  function packFixedCols(names, boxX, boxY, boxH, cols, positions) {
+    const n = names.length;
+    const rows = Math.ceil(n / cols);
+    const tileH = (boxH - (rows - 1) * GAP) / rows;
+    const tileW = tileH * RATIO;
+    const totalW = cols * tileW + (cols - 1) * GAP;
+
+    names.forEach((name, i) => {
+      const row = Math.floor(i / cols);
+      const col = i % cols;
+      const itemsInRow = Math.min(cols, n - row * cols);
+      const rowW = itemsInRow * tileW + (itemsInRow - 1) * GAP;
+      const rowOffsetX = boxX + (totalW - rowW) / 2;
+      const x = rowOffsetX + col * (tileW + GAP);
+      const y = boxY + row * (tileH + GAP);
+      positions.set(name, { x, y, w: tileW, h: tileH, isMain: false });
+    });
+  }
+
+  // Same as packFixedCols but forcing a row count instead, filling the full
+  // box width — used when the sidebar sits below the main video (column
+  // orientation: main top, sidebar bottom).
+  function packFixedRows(names, boxX, boxY, boxW, rows, positions) {
+    const n = names.length;
+    const cols = Math.ceil(n / rows);
+    const tileW = (boxW - (cols - 1) * GAP) / cols;
+    const tileH = tileW / RATIO;
+
+    names.forEach((name, i) => {
+      const row = Math.floor(i / cols);
+      const col = i % cols;
+      const itemsInRow = Math.min(cols, n - row * cols);
+      const rowW = itemsInRow * tileW + (itemsInRow - 1) * GAP;
+      const rowOffsetX = boxX + (boxW - rowW) / 2;
+      const x = rowOffsetX + col * (tileW + GAP);
+      const y = boxY + row * (tileH + GAP);
+      positions.set(name, { x, y, w: tileW, h: tileH, isMain: false });
+    });
+  }
+
+  function computeMainFit(areaW, areaH) {
+    let w, h;
+    if (areaW / areaH > RATIO) {
+      h = areaH;
+      w = h * RATIO;
+    } else {
+      w = areaW;
+      h = w / RATIO;
+    }
+    return { w, h };
+  }
+
+  // The area the main video gets for a given layout "option":
+  //  - option 0: the main video is as large as the available height (row
+  //    orientation) or width (column orientation) allows — its maximal size.
+  //  - option k (1..otherCount): the sidebar is forced into exactly k
+  //    columns (row orientation) or k rows (column orientation), each
+  //    filling the full cross-axis, and the main video gets whatever
+  //    space is left.
+  // These are the only layouts where either the main video or the sidebar
+  // is truly maximized — anything in between wastes space on one side.
+  function computeMainArea(option, otherCount, availW, availH, isRow) {
+    if (option === 0) {
+      if (isRow) {
+        const mainAreaH = availH;
+        const idealW = mainAreaH * RATIO;
+        const maxW = Math.max(availW - HANDLE_SIZE - MIN_SIDE, availW * 0.2);
+        return { mainAreaW: Math.min(idealW, maxW), mainAreaH };
+      }
+      const mainAreaW = availW;
+      const idealH = mainAreaW / RATIO;
+      const maxH = Math.max(availH - HANDLE_SIZE - MIN_SIDE, availH * 0.2);
+      return { mainAreaW, mainAreaH: Math.min(idealH, maxH) };
+    }
+    if (isRow) {
+      const rows = Math.ceil(otherCount / option);
+      const tileH = (availH - (rows - 1) * GAP) / rows;
+      const tileW = tileH * RATIO;
+      const sidebarW = option * tileW + (option - 1) * GAP;
+      return { mainAreaW: Math.max(availW - sidebarW - HANDLE_SIZE, 20), mainAreaH: availH };
+    }
+    const cols = Math.ceil(otherCount / option);
+    const tileW = (availW - (cols - 1) * GAP) / cols;
+    const tileH = tileW / RATIO;
+    const sidebarH = option * tileH + (option - 1) * GAP;
+    return { mainAreaW: availW, mainAreaH: Math.max(availH - sidebarH - HANDLE_SIZE, 20) };
   }
 
   function clamp(min, val, max) {
     return Math.max(min, Math.min(max, val));
   }
 
-  // Quantizes the drag to a handful of evenly spaced notches instead of a
-  // free continuous position, so the split always lands on a "clean"
-  // sidebar arrangement rather than an arbitrary in-between size.
-  function snapFrac(rawFrac, otherCount) {
-    const steps = clamp(1, otherCount, 6);
-    const stepSize = (MAX_MAIN_FRAC - MIN_MAIN_FRAC) / steps;
-    const snapped = MIN_MAIN_FRAC + Math.round((rawFrac - MIN_MAIN_FRAC) / stepSize) * stepSize;
-    return clamp(MIN_MAIN_FRAC, snapped, MAX_MAIN_FRAC);
-  }
-
-  function layoutAll(overrideFrac) {
+  function layoutAll(overrideOption) {
     const hasChannels = state.channels.length > 0;
     el.emptyState.style.display = hasChannels ? "none" : "flex";
     if (!hasChannels) {
@@ -450,28 +498,50 @@
     let handleBox = null;
 
     if (state.mode === "grid") {
-      packGrid(state.channels, GAP, GAP, availW, availH, positions, false);
+      packGrid(state.channels, GAP, GAP, availW, availH, positions);
     } else {
       const mainName = getMainName();
       const others = state.channels.filter((c) => c !== mainName);
       const isRow = availW >= availH;
 
       if (others.length === 0) {
-        packGrid(mainName ? [mainName] : [], GAP, GAP, availW, availH, positions, true);
-      } else if (isRow) {
-        const frac = clamp(MIN_MAIN_FRAC, overrideFrac ?? state.focusMainFrac, MAX_MAIN_FRAC);
-        const mainAreaW = availW * frac - HANDLE_SIZE / 2;
-        const sidebarW = availW - mainAreaW - HANDLE_SIZE;
-        packGrid([mainName], GAP, GAP, mainAreaW, availH, positions, true);
-        packGrid(others, GAP + mainAreaW + HANDLE_SIZE, GAP, sidebarW, availH, positions, false);
-        handleBox = { x: GAP + mainAreaW, y: GAP, w: HANDLE_SIZE, h: availH, orientation: "row" };
+        const fit = computeMainFit(availW, availH);
+        positions.set(mainName, {
+          x: GAP + (availW - fit.w) / 2,
+          y: GAP + (availH - fit.h) / 2,
+          w: fit.w,
+          h: fit.h,
+          isMain: true,
+        });
       } else {
-        const frac = clamp(MIN_MAIN_FRAC, overrideFrac ?? state.focusMainFrac, MAX_MAIN_FRAC);
-        const mainAreaH = availH * frac - HANDLE_SIZE / 2;
-        const sidebarH = availH - mainAreaH - HANDLE_SIZE;
-        packGrid([mainName], GAP, GAP, availW, mainAreaH, positions, true);
-        packGrid(others, GAP, GAP + mainAreaH + HANDLE_SIZE, availW, sidebarH, positions, false);
-        handleBox = { x: GAP, y: GAP + mainAreaH, w: availW, h: HANDLE_SIZE, orientation: "col" };
+        const option = clamp(0, overrideOption ?? state.focusLayoutOption, others.length);
+        const { mainAreaW, mainAreaH } = computeMainArea(option, others.length, availW, availH, isRow);
+        const fit = computeMainFit(mainAreaW, mainAreaH);
+        positions.set(mainName, {
+          x: GAP + (mainAreaW - fit.w) / 2,
+          y: GAP + (mainAreaH - fit.h) / 2,
+          w: fit.w,
+          h: fit.h,
+          isMain: true,
+        });
+
+        if (isRow) {
+          const sidebarX = GAP + mainAreaW + HANDLE_SIZE;
+          if (option === 0) {
+            packGrid(others, sidebarX, GAP, availW - mainAreaW - HANDLE_SIZE, availH, positions);
+          } else {
+            packFixedCols(others, sidebarX, GAP, availH, option, positions);
+          }
+          handleBox = { x: GAP + mainAreaW, y: GAP, w: HANDLE_SIZE, h: availH, orientation: "row" };
+        } else {
+          const sidebarY = GAP + mainAreaH + HANDLE_SIZE;
+          if (option === 0) {
+            packGrid(others, GAP, sidebarY, availW, availH - mainAreaH - HANDLE_SIZE, positions);
+          } else {
+            packFixedRows(others, GAP, sidebarY, availW, option, positions);
+          }
+          handleBox = { x: GAP, y: GAP + mainAreaH, w: availW, h: HANDLE_SIZE, orientation: "col" };
+        }
       }
     }
 
@@ -508,14 +578,34 @@
   }
 
   // ---- Drag to resize the main video ----
+  //
+  // The handle doesn't move freely: it only ever rests at one of the
+  // "optimal" layouts computed by computeMainArea (main maximal, or the
+  // sidebar in exactly 1/2/3/... columns), so dragging picks whichever of
+  // those is closest to the pointer instead of any arbitrary position.
 
   let dragging = false;
-  let dragFrac = null;
+  let dragOption = null;
+
+  function pickNearestOption(rawMainSize, otherCount, availW, availH, isRow) {
+    let bestOption = 0;
+    let bestDiff = Infinity;
+    for (let k = 0; k <= otherCount; k++) {
+      const area = computeMainArea(k, otherCount, availW, availH, isRow);
+      const size = isRow ? area.mainAreaW : area.mainAreaH;
+      const diff = Math.abs(size - rawMainSize);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        bestOption = k;
+      }
+    }
+    return bestOption;
+  }
 
   el.focusHandle.addEventListener("pointerdown", (e) => {
     if (!el.focusHandle.classList.contains("visible")) return;
     dragging = true;
-    dragFrac = state.focusMainFrac;
+    dragOption = state.focusLayoutOption;
     el.focusHandle.classList.add("dragging");
     el.focusHandle.setPointerCapture(e.pointerId);
   });
@@ -523,21 +613,21 @@
   el.focusHandle.addEventListener("pointermove", (e) => {
     if (!dragging) return;
     const rect = el.stage.getBoundingClientRect();
+    const availW = rect.width - GAP * 2;
+    const availH = rect.height - GAP * 2;
     const isRow = el.focusHandle.classList.contains("row");
-    const rawFrac = isRow
-      ? (e.clientX - rect.left) / rect.width
-      : (e.clientY - rect.top) / rect.height;
+    const rawMainSize = isRow ? e.clientX - rect.left - GAP : e.clientY - rect.top - GAP;
     const otherCount = Math.max(0, state.channels.length - 1);
-    dragFrac = snapFrac(clamp(MIN_MAIN_FRAC, rawFrac, MAX_MAIN_FRAC), otherCount);
-    layoutAll(dragFrac);
+    dragOption = pickNearestOption(rawMainSize, otherCount, availW, availH, isRow);
+    layoutAll(dragOption);
   });
 
   function endDrag() {
     if (!dragging) return;
     dragging = false;
     el.focusHandle.classList.remove("dragging");
-    if (dragFrac !== null) {
-      state.focusMainFrac = dragFrac;
+    if (dragOption !== null) {
+      state.focusLayoutOption = dragOption;
       saveState();
     }
   }
@@ -556,8 +646,8 @@
     tiles.get(name)?.el.classList.add("drag-source");
 
     const onMove = (e) => {
-      const el2 = document.elementFromPoint(e.clientX, e.clientY);
-      const tileEl = el2 && el2.closest(".tile");
+      const hit = document.elementFromPoint(e.clientX, e.clientY);
+      const tileEl = hit && hit.closest(".tile");
       const targetName = tileEl && tileEl.dataset.channel;
       if (targetName !== reorderTarget) {
         if (reorderTarget) tiles.get(reorderTarget)?.el.classList.remove("drag-target");

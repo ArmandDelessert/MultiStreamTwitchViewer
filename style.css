@@ -107,6 +107,13 @@ body {
   color: white;
 }
 
+.globalActions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.globalActions button,
 #fullscreenBtn {
   background: var(--panel-2);
   border: 1px solid var(--border);
@@ -116,8 +123,9 @@ body {
   padding: 8px 14px;
   font-size: 0.85rem;
   font-weight: 600;
-  margin-left: auto;
+  white-space: nowrap;
 }
+.globalActions button:hover,
 #fullscreenBtn:hover { color: var(--text); border-color: var(--accent); }
 
 #stage {
@@ -260,7 +268,6 @@ body {
 }
 .iconBtn:hover { background: var(--accent); }
 .iconBtn.danger:hover { background: var(--danger); }
-.iconBtn.muted { color: var(--danger); }
 .iconBtn.hidden { display: none; }
 
 .mainBadge {
