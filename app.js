@@ -30,6 +30,7 @@
   // or resizing only ever repositions these elements, never recreates the
   // underlying Twitch player/iframe.
   const tiles = new Map();
+  if (location.search.includes("debug")) window.__tiles = tiles;
 
   function loadState() {
     try {
@@ -147,17 +148,29 @@
 
     const record = { el: container, player: null, playing: true, promoteBtn };
     tiles.set(name, record);
+    mountPlayer(name, mount.id, state.muted[name] !== false);
+
+    updatePauseAllButton();
+    return record;
+  }
+
+  // Creates (or re-creates) the Twitch.Player for a channel and wires up
+  // the PLAY/PAUSE listeners that keep record.playing accurate.
+  function mountPlayer(name, mountId, muted) {
+    const record = tiles.get(name);
+    if (!record) return;
 
     if (window.Twitch && window.Twitch.Player) {
-      const player = new window.Twitch.Player(mount.id, {
+      const player = new window.Twitch.Player(mountId, {
         width: "100%",
         height: "100%",
         channel: name,
         parent: [location.hostname || "localhost"],
-        muted: true,
+        muted,
         autoplay: true,
       });
       record.player = player;
+      record.playing = true;
       try {
         player.addEventListener(window.Twitch.Player.PLAY, () => {
           record.playing = true;
@@ -172,20 +185,18 @@
       }
     } else {
       console.warn("Twitch embed SDK not available; falling back to iframe for", name);
+      const mount = document.getElementById(mountId);
       const iframe = document.createElement("iframe");
       iframe.allowFullscreen = true;
       const params = new URLSearchParams({
         channel: name,
         parent: location.hostname || "localhost",
-        muted: "true",
+        muted: muted ? "true" : "false",
         autoplay: "true",
       });
       iframe.src = `https://player.twitch.tv/?${params.toString()}`;
       mount.appendChild(iframe);
     }
-
-    updatePauseAllButton();
-    return record;
   }
 
   function destroyTile(name) {
@@ -233,31 +244,58 @@
 
   // ---- Global controls (toolbar) ----
 
-  function anyPlaying() {
+  function allPlaying() {
     for (const record of tiles.values()) {
-      if (record.playing) return true;
+      if (!record.playing) return false;
     }
-    return false;
+    return tiles.size > 0;
   }
 
   function updatePauseAllButton() {
-    const playing = anyPlaying();
+    // "Tout lancer" as soon as a single stream is paused — pausing
+    // everything is only offered once nothing is left to resume.
+    const playing = allPlaying();
     el.pauseAllBtn.textContent = playing ? "⏸ Tout mettre en pause" : "▶ Tout lancer";
     el.pauseAllBtn.title = playing
       ? "Mettre tous les streams en pause"
       : "Lancer la lecture de tous les streams";
   }
 
+  // Twitch's embed player doesn't actually resume a live channel once
+  // paused — calling play() again leaves it sitting idle (confirmed via
+  // its own getPlayerState(): playback stays "Idle"). The only reliable
+  // way to get it playing again is to tear down and recreate the player,
+  // which briefly reloads that one tile.
+  function resumeTile(name) {
+    const record = tiles.get(name);
+    if (!record) return;
+    try {
+      record.player?.destroy?.();
+    } catch (e) {
+      /* ignore */
+    }
+    const mountId = `twitch-player-${name}`;
+    const mount = document.getElementById(mountId);
+    if (mount) mount.innerHTML = "";
+    mountPlayer(name, mountId, state.muted[name] !== false);
+  }
+
   el.pauseAllBtn.addEventListener("click", () => {
-    const shouldPause = anyPlaying();
-    for (const record of tiles.values()) {
-      try {
-        if (shouldPause) record.player?.pause();
-        else record.player?.play();
-      } catch (e) {
-        /* ignore */
+    const shouldPause = allPlaying();
+    for (const [name, record] of tiles) {
+      if (shouldPause) {
+        if (!record.playing) continue;
+        try {
+          record.player?.pause();
+        } catch (e) {
+          /* ignore */
+        }
+        record.playing = false;
+      } else if (!record.playing) {
+        // Only reload tiles that actually need resuming — the ones still
+        // playing are left untouched.
+        resumeTile(name);
       }
-      record.playing = !shouldPause;
     }
     updatePauseAllButton();
   });
@@ -314,8 +352,11 @@
 
   function setMode(mode) {
     state.mode = mode;
-    if (mode === "focus" && !getMainName() && state.channels.length) {
-      promoteMain(state.channels[0]);
+    // Always (re-)promote the main channel on entering focus mode, even if
+    // one was already set from a previous session — otherwise a main
+    // channel picked while still muted in grid mode would stay silent.
+    if (mode === "focus" && state.channels.length) {
+      promoteMain(getMainName() || state.channels[0]);
     }
     saveState();
     el.modeGrid.classList.toggle("active", state.mode === "grid");
