@@ -127,6 +127,14 @@ body {
 }
 .globalActions button:hover,
 #fullscreenBtn:hover { color: var(--text); border-color: var(--accent); }
+.globalActions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.globalActions button:disabled:hover {
+  color: var(--text-dim);
+  border-color: var(--border);
+}
 
 #stage {
   position: relative;

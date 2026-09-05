@@ -244,58 +244,53 @@
 
   // ---- Global controls (toolbar) ----
 
+  // Twitch's embed player can't reliably resume a paused stream via play()
+  // once *any* CSS class/style change has ever touched its tile — verified
+  // directly against getPlayerState() (playback gets stuck on "Idle").
+  // Since becoming the focus-mode main tile always applies the "is-main"
+  // class, that one tile is structurally the one this can't fix; it's left
+  // out of the global controls; its own Twitch controls still work fine
+  // since a real click is a genuine user gesture inside the iframe.
+  function nonMainTiles() {
+    const mainName = state.mode === "focus" ? getMainName() : null;
+    return [...tiles.entries()].filter(([name]) => name !== mainName);
+  }
+
   function allPlaying() {
-    for (const record of tiles.values()) {
-      if (!record.playing) return false;
-    }
-    return tiles.size > 0;
+    const list = nonMainTiles();
+    return list.every(([, record]) => record.playing);
   }
 
   function updatePauseAllButton() {
-    // "Tout lancer" as soon as a single stream is paused — pausing
-    // everything is only offered once nothing is left to resume.
-    const playing = allPlaying();
+    const list = nonMainTiles();
+    if (list.length === 0) {
+      // Nothing left to control (e.g. a single channel, in focus mode) —
+      // use the main video's own Twitch controls directly instead.
+      el.pauseAllBtn.disabled = true;
+      el.pauseAllBtn.textContent = "⏸ Tout mettre en pause";
+      el.pauseAllBtn.title = "Utilisez les contrôles de la vidéo principale";
+      return;
+    }
+    el.pauseAllBtn.disabled = false;
+    // "Tout lancer" as soon as a single (controllable) stream is paused —
+    // pausing everything is only offered once nothing is left to resume.
+    const playing = list.every(([, record]) => record.playing);
     el.pauseAllBtn.textContent = playing ? "⏸ Tout mettre en pause" : "▶ Tout lancer";
     el.pauseAllBtn.title = playing
       ? "Mettre tous les streams en pause"
       : "Lancer la lecture de tous les streams";
   }
 
-  // Twitch's embed player doesn't actually resume a live channel once
-  // paused — calling play() again leaves it sitting idle (confirmed via
-  // its own getPlayerState(): playback stays "Idle"). The only reliable
-  // way to get it playing again is to tear down and recreate the player,
-  // which briefly reloads that one tile.
-  function resumeTile(name) {
-    const record = tiles.get(name);
-    if (!record) return;
-    try {
-      record.player?.destroy?.();
-    } catch (e) {
-      /* ignore */
-    }
-    const mountId = `twitch-player-${name}`;
-    const mount = document.getElementById(mountId);
-    if (mount) mount.innerHTML = "";
-    mountPlayer(name, mountId, state.muted[name] !== false);
-  }
-
   el.pauseAllBtn.addEventListener("click", () => {
     const shouldPause = allPlaying();
-    for (const [name, record] of tiles) {
-      if (shouldPause) {
-        if (!record.playing) continue;
-        try {
-          record.player?.pause();
-        } catch (e) {
-          /* ignore */
-        }
-        record.playing = false;
-      } else if (!record.playing) {
-        // Only reload tiles that actually need resuming — the ones still
-        // playing are left untouched.
-        resumeTile(name);
+    for (const [, record] of nonMainTiles()) {
+      try {
+        if (shouldPause) record.player?.pause();
+        else record.player?.play();
+      } catch (e) {
+        /* ignore */
       }
+      record.playing = !shouldPause;
     }
     updatePauseAllButton();
   });
@@ -362,12 +357,14 @@
     el.modeGrid.classList.toggle("active", state.mode === "grid");
     el.modeFocus.classList.toggle("active", state.mode === "focus");
     layoutAll();
+    updatePauseAllButton();
   }
 
   function setMain(name) {
     promoteMain(name);
     saveState();
     layoutAll();
+    updatePauseAllButton();
   }
 
   function switchToFocus(name) {
@@ -377,6 +374,7 @@
     el.modeGrid.classList.toggle("active", false);
     el.modeFocus.classList.toggle("active", true);
     layoutAll();
+    updatePauseAllButton();
   }
 
   // ---- Layout ----
