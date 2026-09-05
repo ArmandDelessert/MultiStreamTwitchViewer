@@ -121,6 +121,21 @@
     }
   }
 
+  // If closing or moving a channel leaves one side of the split with
+  // nothing in it, drop the split entirely and go back to a plain grid —
+  // rather than silently refilling that side or rendering a flat grid
+  // while still nominally in "split" mode. Returns whether it collapsed.
+  function collapseToGridIfZoneEmpty() {
+    if (state.mode !== "split" || state.channels.length <= 1) return false;
+    const { a, b } = getZones();
+    if (a.length === 0 || b.length === 0) {
+      state.mode = "grid";
+      updateModeButtons();
+      return true;
+    }
+    return false;
+  }
+
   // A zone with exactly one channel is shown large with a "PRINCIPAL" badge
   // and — because of a Twitch player quirk (see promoteAudio comment below
   // and updatePauseAllButton) — is left out of the global play/pause action.
@@ -431,7 +446,7 @@
     state.zoneA = state.zoneA.filter((c) => c !== name);
     delete state.muted[name];
     destroyTile(name);
-    if (state.mode === "split") ensureValidZoneA();
+    collapseToGridIfZoneEmpty();
     saveState();
     layoutAll();
     updatePauseAllButton();
@@ -502,6 +517,7 @@
       if (idx !== -1) state.zoneA.splice(idx, 0, name);
       else state.zoneA.push(name);
     }
+    collapseToGridIfZoneEmpty();
     saveState();
     layoutAll();
     updatePauseAllButton();
@@ -880,12 +896,9 @@
             layoutAll();
           }
         } else if (targetZone && targetZone !== sourceZone) {
-          // Never let a drag fully empty a zone — with no tile left there,
-          // there'd be no divider to drag through to get one back.
-          const sourceCount = getZones()[sourceZone].length;
-          if (sourceCount > 1 || state.channels.length <= 1) {
-            moveToZone(reorderSource, targetZone, reorderTarget);
-          }
+          // Moving the last tile out of a zone empties it — moveToZone
+          // itself notices and drops back to a plain grid in that case.
+          moveToZone(reorderSource, targetZone, reorderTarget);
         }
       }
 
