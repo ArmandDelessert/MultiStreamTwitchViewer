@@ -138,6 +138,141 @@ body {
   border-color: var(--border);
 }
 
+.twitchAccount {
+  position: relative;
+}
+
+.twitchPanel {
+  position: fixed;
+  width: 320px;
+  max-height: 70vh;
+  overflow-y: auto;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  z-index: 20;
+  font-size: 0.85rem;
+}
+.twitchPanel.hidden { display: none; }
+
+.twitchPanel h3 {
+  margin: 0 0 8px;
+  font-size: 0.9rem;
+}
+.twitchPanel p {
+  margin: 0 0 10px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+.twitchPanel label {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+.twitchPanel input[type="text"] {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 0.8rem;
+  margin-bottom: 10px;
+}
+.twitchPanel .primaryBtn {
+  width: 100%;
+  background: var(--accent);
+  border: none;
+  color: white;
+  padding: 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+.twitchPanel .primaryBtn:hover { background: var(--accent-hover); }
+.twitchPanel .linkBtn {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  text-decoration: underline;
+  cursor: pointer;
+  font-size: 0.75rem;
+  padding: 0;
+  margin-top: 8px;
+}
+.twitchPanel .linkBtn:hover { color: var(--text); }
+
+.twitchAccountRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.twitchAccountRow strong { color: var(--text); }
+
+.twitchLiveList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.twitchLiveItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px;
+  border-radius: 6px;
+  background: var(--panel);
+}
+.twitchLiveItem .liveDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--danger);
+  flex: 0 0 auto;
+}
+.twitchLiveItem .liveInfo {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+.twitchLiveItem .liveName {
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.twitchLiveItem .liveMeta {
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.twitchLiveItem button {
+  flex: 0 0 auto;
+  background: var(--accent);
+  border: none;
+  color: white;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 700;
+}
+.twitchLiveItem button:hover { background: var(--accent-hover); }
+.twitchLiveItem button:disabled {
+  background: var(--border);
+  cursor: default;
+}
+
 #stage {
   position: relative;
   flex: 1 1 auto;

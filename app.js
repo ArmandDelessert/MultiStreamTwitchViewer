@@ -24,6 +24,8 @@
     muteAllBtn: document.getElementById("muteAllBtn"),
     resyncAllBtn: document.getElementById("resyncAllBtn"),
     qualitySelect: document.getElementById("qualitySelect"),
+    twitchAccountBtn: document.getElementById("twitchAccountBtn"),
+    twitchPanel: document.getElementById("twitchPanel"),
     toolbar: document.getElementById("toolbar"),
   };
 
@@ -930,6 +932,341 @@
     resizeTimer = setTimeout(() => layoutAll(), 60);
   });
   ro.observe(el.stage);
+
+  // ---- Twitch account (OAuth) ----
+  //
+  // Implicit Grant flow: this is a static, backend-less page, so there's no
+  // way to keep a client secret. The standard client-side approach is to
+  // redirect to Twitch, get an access token back in the URL fragment, and
+  // call the Helix API directly from the browser (Twitch's Helix endpoints
+  // support CORS for this exact flow). The token can't be silently
+  // refreshed this way — it just expires after a few hours and the user
+  // reconnects.
+
+  const TWITCH_CLIENT_ID_KEY = "twitchMultiView.twitchClientId";
+  const TWITCH_TOKEN_KEY = "twitchMultiView.twitchToken";
+  const TWITCH_OAUTH_STATE_KEY = "twitchMultiView.twitchOAuthState";
+  const TWITCH_SCOPE = "user:read:follows";
+
+  let twitchLiveFollowed = null; // null = not fetched yet this session
+  let twitchLoading = false;
+  let twitchError = null;
+
+  function getRedirectUri() {
+    return location.origin + location.pathname;
+  }
+
+  function getClientId() {
+    return localStorage.getItem(TWITCH_CLIENT_ID_KEY) || "";
+  }
+
+  function getTwitchToken() {
+    try {
+      const raw = localStorage.getItem(TWITCH_TOKEN_KEY);
+      if (!raw) return null;
+      const token = JSON.parse(raw);
+      if (!token.access_token || !token.obtained_at || !token.expires_in) return null;
+      if (Date.now() > token.obtained_at + token.expires_in * 1000) {
+        localStorage.removeItem(TWITCH_TOKEN_KEY);
+        return null;
+      }
+      return token;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function disconnectTwitch() {
+    localStorage.removeItem(TWITCH_TOKEN_KEY);
+    twitchLiveFollowed = null;
+    twitchError = null;
+    renderTwitchPanel();
+  }
+
+  function startTwitchLogin() {
+    const clientId = getClientId();
+    if (!clientId) return;
+    const state2 = Math.random().toString(36).slice(2) + Date.now().toString(36);
+    sessionStorage.setItem(TWITCH_OAUTH_STATE_KEY, state2);
+    const params = new URLSearchParams({
+      client_id: clientId,
+      redirect_uri: getRedirectUri(),
+      response_type: "token",
+      scope: TWITCH_SCOPE,
+      state: state2,
+    });
+    location.href = `https://id.twitch.tv/oauth2/authorize?${params.toString()}`;
+  }
+
+  // Runs once at startup: if we've just been bounced back from Twitch's
+  // authorize page, the access token is sitting in the URL fragment.
+  // Returns true if a token was just obtained this way.
+  function consumeOAuthRedirect() {
+    if (!location.hash || !location.hash.includes("access_token")) return false;
+    const params = new URLSearchParams(location.hash.slice(1));
+    const accessToken = params.get("access_token");
+    const expiresIn = Number(params.get("expires_in"));
+    const returnedState = params.get("state");
+    const expectedState = sessionStorage.getItem(TWITCH_OAUTH_STATE_KEY);
+    sessionStorage.removeItem(TWITCH_OAUTH_STATE_KEY);
+    history.replaceState(null, "", location.pathname + location.search);
+    if (!accessToken || !expectedState || returnedState !== expectedState) return false;
+    localStorage.setItem(
+      TWITCH_TOKEN_KEY,
+      JSON.stringify({ access_token: accessToken, expires_in: expiresIn || 14400, obtained_at: Date.now() })
+    );
+    return true;
+  }
+
+  async function twitchApiFetch(url) {
+    const token = getTwitchToken();
+    const clientId = getClientId();
+    if (!token || !clientId) throw new Error("not-connected");
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${token.access_token}`, "Client-Id": clientId },
+    });
+    if (res.status === 401) {
+      disconnectTwitch();
+      throw new Error("unauthorized");
+    }
+    if (!res.ok) throw new Error(`Twitch API error ${res.status}`);
+    return res.json();
+  }
+
+  async function fetchTwitchUser() {
+    const data = await twitchApiFetch("https://api.twitch.tv/helix/users");
+    return data.data && data.data[0];
+  }
+
+  async function fetchFollowedBroadcasters(userId) {
+    const broadcasters = [];
+    let cursor = "";
+    do {
+      const params = new URLSearchParams({ user_id: userId, first: "100" });
+      if (cursor) params.set("after", cursor);
+      const data = await twitchApiFetch(`https://api.twitch.tv/helix/channels/followed?${params.toString()}`);
+      for (const item of data.data || []) {
+        broadcasters.push(item.broadcaster_id);
+      }
+      cursor = data.pagination && data.pagination.cursor;
+    } while (cursor);
+    return broadcasters;
+  }
+
+  async function fetchLiveStreams(broadcasterIds) {
+    const live = [];
+    for (let i = 0; i < broadcasterIds.length; i += 100) {
+      const chunk = broadcasterIds.slice(i, i + 100);
+      const params = new URLSearchParams();
+      params.set("first", "100");
+      for (const id of chunk) params.append("user_id", id);
+      const data = await twitchApiFetch(`https://api.twitch.tv/helix/streams?${params.toString()}`);
+      for (const item of data.data || []) {
+        live.push({
+          login: item.user_login,
+          name: item.user_name,
+          gameName: item.game_name,
+          viewerCount: item.viewer_count,
+        });
+      }
+    }
+    live.sort((a, b) => b.viewerCount - a.viewerCount);
+    return live;
+  }
+
+  async function refreshFollowedLive() {
+    twitchLoading = true;
+    twitchError = null;
+    renderTwitchPanel();
+    try {
+      const user = await fetchTwitchUser();
+      const followedIds = await fetchFollowedBroadcasters(user.id);
+      twitchLiveFollowed = await fetchLiveStreams(followedIds);
+    } catch (e) {
+      twitchError = "Impossible de récupérer vos chaînes suivies.";
+      console.warn(e);
+    }
+    twitchLoading = false;
+    renderTwitchPanel();
+  }
+
+  function renderTwitchPanel() {
+    const panel = el.twitchPanel;
+    panel.innerHTML = "";
+    const clientId = getClientId();
+    const token = getTwitchToken();
+
+    if (!clientId) {
+      const h = document.createElement("h3");
+      h.textContent = "Connecter Twitch";
+      panel.appendChild(h);
+
+      const p = document.createElement("p");
+      p.innerHTML =
+        "Créez une application gratuite sur <strong>dev.twitch.tv/console/apps</strong> " +
+        "(bouton « Register Your Application »), avec cette URL de redirection exacte :";
+      panel.appendChild(p);
+
+      const redirectInput = document.createElement("input");
+      redirectInput.type = "text";
+      redirectInput.readOnly = true;
+      redirectInput.value = getRedirectUri();
+      redirectInput.addEventListener("click", () => redirectInput.select());
+      panel.appendChild(redirectInput);
+
+      const p2 = document.createElement("p");
+      p2.textContent = "Puis collez ici le « Client ID » généré :";
+      panel.appendChild(p2);
+
+      const idInput = document.createElement("input");
+      idInput.type = "text";
+      idInput.placeholder = "Client ID Twitch";
+      panel.appendChild(idInput);
+
+      const saveBtn = document.createElement("button");
+      saveBtn.className = "primaryBtn";
+      saveBtn.textContent = "Enregistrer";
+      saveBtn.addEventListener("click", () => {
+        const val = idInput.value.trim();
+        if (val) {
+          localStorage.setItem(TWITCH_CLIENT_ID_KEY, val);
+          renderTwitchPanel();
+        }
+      });
+      panel.appendChild(saveBtn);
+      return;
+    }
+
+    if (!token) {
+      const h = document.createElement("h3");
+      h.textContent = "Connecter Twitch";
+      panel.appendChild(h);
+
+      const p = document.createElement("p");
+      p.textContent = "Connectez-vous pour voir vos chaînes suivies actuellement en direct.";
+      panel.appendChild(p);
+
+      const loginBtn = document.createElement("button");
+      loginBtn.className = "primaryBtn";
+      loginBtn.textContent = "Se connecter à Twitch";
+      loginBtn.addEventListener("click", startTwitchLogin);
+      panel.appendChild(loginBtn);
+
+      const forget = document.createElement("button");
+      forget.className = "linkBtn";
+      forget.textContent = "Changer de Client ID";
+      forget.addEventListener("click", () => {
+        localStorage.removeItem(TWITCH_CLIENT_ID_KEY);
+        renderTwitchPanel();
+      });
+      panel.appendChild(forget);
+      return;
+    }
+
+    const row = document.createElement("div");
+    row.className = "twitchAccountRow";
+    const status = document.createElement("span");
+    status.textContent = twitchLoading ? "Chargement…" : "Connecté";
+    row.appendChild(status);
+    const disconnectBtn = document.createElement("button");
+    disconnectBtn.className = "linkBtn";
+    disconnectBtn.textContent = "Se déconnecter";
+    disconnectBtn.addEventListener("click", disconnectTwitch);
+    row.appendChild(disconnectBtn);
+    panel.appendChild(row);
+
+    const refreshBtn = document.createElement("button");
+    refreshBtn.className = "primaryBtn";
+    refreshBtn.textContent = twitchLoading ? "Chargement…" : "🔄 Actualiser les chaînes en direct";
+    refreshBtn.disabled = twitchLoading;
+    refreshBtn.addEventListener("click", refreshFollowedLive);
+    panel.appendChild(refreshBtn);
+
+    if (twitchError) {
+      const err = document.createElement("p");
+      err.textContent = twitchError;
+      panel.appendChild(err);
+    }
+
+    if (twitchLiveFollowed) {
+      const h = document.createElement("h3");
+      h.style.marginTop = "12px";
+      h.textContent = twitchLiveFollowed.length
+        ? `${twitchLiveFollowed.length} chaîne(s) suivie(s) en direct`
+        : "Aucune chaîne suivie n'est en direct";
+      panel.appendChild(h);
+
+      const list = document.createElement("ul");
+      list.className = "twitchLiveList";
+      for (const stream of twitchLiveFollowed) {
+        const li = document.createElement("li");
+        li.className = "twitchLiveItem";
+
+        const dot = document.createElement("span");
+        dot.className = "liveDot";
+        li.appendChild(dot);
+
+        const info = document.createElement("div");
+        info.className = "liveInfo";
+        const nameEl = document.createElement("div");
+        nameEl.className = "liveName";
+        nameEl.textContent = stream.name;
+        info.appendChild(nameEl);
+        const meta = document.createElement("div");
+        meta.className = "liveMeta";
+        meta.textContent = `${stream.gameName || "?"} · ${stream.viewerCount.toLocaleString("fr-FR")} viewers`;
+        info.appendChild(meta);
+        li.appendChild(info);
+
+        const already = state.channels.includes(stream.login);
+        const addBtn = document.createElement("button");
+        addBtn.textContent = already ? "✓" : "+";
+        addBtn.disabled = already;
+        addBtn.title = already ? "Déjà ajoutée" : "Ajouter cette chaîne";
+        addBtn.addEventListener("click", () => {
+          addChannels(stream.login);
+          renderTwitchPanel();
+        });
+        li.appendChild(addBtn);
+
+        list.appendChild(li);
+      }
+      panel.appendChild(list);
+    }
+  }
+
+  function positionTwitchPanel() {
+    const rect = el.twitchAccountBtn.getBoundingClientRect();
+    const width = 320;
+    el.twitchPanel.style.top = `${Math.round(rect.bottom + 8)}px`;
+    el.twitchPanel.style.left = `${Math.round(clamp(8, rect.right - width, window.innerWidth - width - 8))}px`;
+  }
+
+  el.twitchAccountBtn.addEventListener("click", () => {
+    el.twitchPanel.classList.toggle("hidden");
+    if (!el.twitchPanel.classList.contains("hidden")) {
+      positionTwitchPanel();
+      renderTwitchPanel();
+    }
+  });
+
+  document.addEventListener("click", (e) => {
+    if (
+      !el.twitchPanel.classList.contains("hidden") &&
+      !el.twitchPanel.contains(e.target) &&
+      e.target !== el.twitchAccountBtn
+    ) {
+      el.twitchPanel.classList.add("hidden");
+    }
+  });
+
+  const justConnectedToTwitch = consumeOAuthRedirect();
+  if (justConnectedToTwitch) {
+    el.twitchPanel.classList.remove("hidden");
+    positionTwitchPanel();
+    renderTwitchPanel();
+    refreshFollowedLive();
+  }
 
   // ---- Init ----
 
