@@ -17,8 +17,8 @@
     focusHandle: document.getElementById("focusHandle"),
     addForm: document.getElementById("addForm"),
     channelInput: document.getElementById("channelInput"),
-    modeGrid: document.getElementById("modeGrid"),
-    modeFocus: document.getElementById("modeFocus"),
+    splitToggleBtn: document.getElementById("splitToggleBtn"),
+    swapZonesBtn: document.getElementById("swapZonesBtn"),
     fullscreenBtn: document.getElementById("fullscreenBtn"),
     pauseAllBtn: document.getElementById("pauseAllBtn"),
     muteAllBtn: document.getElementById("muteAllBtn"),
@@ -184,6 +184,16 @@
     nameEl.textContent = name;
     row.appendChild(nameEl);
 
+    const bufferBtn = document.createElement("button");
+    bufferBtn.className = "iconBtn";
+    bufferBtn.textContent = "⏩";
+    bufferBtn.title = "Rattraper le direct (réduire le décalage)";
+    bufferBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      resyncToLive(name);
+    });
+    row.appendChild(bufferBtn);
+
     const removeBtn = document.createElement("button");
     removeBtn.className = "iconBtn danger";
     removeBtn.textContent = "✕";
@@ -276,6 +286,23 @@
       }
     } catch (e) {
       /* player not ready yet; it will pick up the initial "muted" option */
+    }
+  }
+
+  // Nudges a live stream back to the live edge to claw back accumulated
+  // buffering delay — the same idea as browser extensions with a "fast
+  // forward buffer" button, but done through Twitch's embed API instead of
+  // reaching into the player's own <video> element (which we can't do:
+  // player.twitch.tv is a cross-origin iframe, even though it's Twitch's
+  // own domain). Seeking past the end of the seekable range is how HTML5
+  // live players commonly expose "jump to live".
+  function resyncToLive(name) {
+    const record = tiles.get(name);
+    if (!record || !record.player) return;
+    try {
+      record.player.seek(1e10);
+    } catch (e) {
+      /* ignore */
     }
   }
 
@@ -387,12 +414,35 @@
     updatePauseAllButton();
   }
 
-  function setMode(mode) {
-    state.mode = mode;
-    if (mode === "split") ensureValidZoneA();
+  function updateModeButtons() {
+    const isSplit = state.mode === "split";
+    el.splitToggleBtn.textContent = isSplit ? "⊟ Retirer la séparation" : "⊞ Ajouter une séparation";
+    el.splitToggleBtn.title = isSplit
+      ? "Revenir à une grille simple"
+      : "Créer deux zones séparées par une poignée";
+    el.swapZonesBtn.classList.toggle("hidden", !isSplit);
+  }
+
+  function toggleSplit() {
+    if (state.mode === "split") {
+      state.mode = "grid";
+    } else {
+      state.mode = "split";
+      ensureValidZoneA();
+    }
     saveState();
-    el.modeGrid.classList.toggle("active", state.mode === "grid");
-    el.modeFocus.classList.toggle("active", state.mode === "split");
+    updateModeButtons();
+    layoutAll();
+    updatePauseAllButton();
+  }
+
+  // Moves every channel to the opposite side: whatever was in zone B
+  // becomes zone A and vice versa (zone B is always just "the rest", so
+  // nothing needs to change there explicitly).
+  function swapZones() {
+    if (state.mode !== "split") return;
+    state.zoneA = getZones().b;
+    saveState();
     layoutAll();
     updatePauseAllButton();
   }
@@ -414,8 +464,7 @@
     state.zoneA = [name];
     promoteAudio(name);
     saveState();
-    el.modeGrid.classList.toggle("active", false);
-    el.modeFocus.classList.toggle("active", true);
+    updateModeButtons();
     layoutAll();
     updatePauseAllButton();
   }
@@ -843,8 +892,8 @@
     }
   });
 
-  el.modeGrid.addEventListener("click", () => setMode("grid"));
-  el.modeFocus.addEventListener("click", () => setMode("split"));
+  el.splitToggleBtn.addEventListener("click", toggleSplit);
+  el.swapZonesBtn.addEventListener("click", swapZones);
 
   el.fullscreenBtn.addEventListener("click", () => {
     if (!document.fullscreenElement) {
@@ -864,8 +913,7 @@
   // ---- Init ----
 
   function init() {
-    el.modeGrid.classList.toggle("active", state.mode === "grid");
-    el.modeFocus.classList.toggle("active", state.mode === "split");
+    updateModeButtons();
     for (const name of state.channels) {
       createTile(name);
     }

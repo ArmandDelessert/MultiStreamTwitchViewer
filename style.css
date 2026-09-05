@@ -84,28 +84,24 @@ body {
 }
 #addForm button:hover { background: var(--accent-hover); }
 
-.modeSwitch {
-  display: flex;
-  background: var(--panel-2);
-  border-radius: var(--radius);
-  padding: 3px;
-  border: 1px solid var(--border);
-}
-
 .modeBtn {
-  background: transparent;
-  border: none;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
   color: var(--text-dim);
-  padding: 6px 14px;
-  border-radius: 7px;
+  padding: 8px 14px;
+  border-radius: var(--radius);
   cursor: pointer;
   font-size: 0.85rem;
   font-weight: 600;
+  white-space: nowrap;
 }
+.modeBtn:hover { color: var(--text); border-color: var(--accent); }
 .modeBtn.active {
   background: var(--accent);
   color: white;
+  border-color: var(--accent);
 }
+.modeBtn.hidden { display: none; }
 
 .globalActions {
   display: flex;
