@@ -4,10 +4,10 @@
   const RATIO = 16 / 9;
   const GAP = 8;
   const HANDLE_SIZE = 8;
-  const MIN_SIDE = 80; // minimal room reserved for the sidebar when the main video is at its maximal size
+  const MIN_OTHER_SIDE = 20; // never let a split notch fully starve the other zone
   const STORAGE_KEY = "twitchMultiView.state.v1";
 
-  /** @type {{channels: string[], mode: "grid"|"focus", mainChannel: string|null, muted: Record<string, boolean>, focusLayoutOption: number}} */
+  /** @type {{channels: string[], mode: "grid"|"split", zoneA: string[], muted: Record<string, boolean>, splitNotch: {side: "a"|"b", lines: number}}} */
   let state = loadState();
 
   const el = {
@@ -37,18 +37,34 @@
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw);
+        const mode = parsed.mode === "focus" || parsed.mode === "split" ? "split" : "grid";
+        let zoneA;
+        if (Array.isArray(parsed.zoneA)) zoneA = parsed.zoneA;
+        else if (parsed.mainChannel) zoneA = [parsed.mainChannel];
+        else zoneA = [];
+        let splitNotch;
+        if (parsed.splitNotch && typeof parsed.splitNotch.lines === "number") {
+          splitNotch = { side: parsed.splitNotch.side === "b" ? "b" : "a", lines: parsed.splitNotch.lines };
+        } else if (Number.isInteger(parsed.focusLayoutOption)) {
+          splitNotch =
+            parsed.focusLayoutOption === 0
+              ? { side: "a", lines: 1 }
+              : { side: "b", lines: parsed.focusLayoutOption };
+        } else {
+          splitNotch = { side: "a", lines: 1 };
+        }
         return {
           channels: Array.isArray(parsed.channels) ? parsed.channels : [],
-          mode: parsed.mode === "focus" ? "focus" : "grid",
-          mainChannel: parsed.mainChannel || null,
+          mode,
+          zoneA,
           muted: parsed.muted && typeof parsed.muted === "object" ? parsed.muted : {},
-          focusLayoutOption: Number.isInteger(parsed.focusLayoutOption) ? parsed.focusLayoutOption : 0,
+          splitNotch,
         };
       }
     } catch (e) {
       console.warn("Failed to load state", e);
     }
-    return { channels: [], mode: "grid", mainChannel: null, muted: {}, focusLayoutOption: 0 };
+    return { channels: [], mode: "grid", zoneA: [], muted: {}, splitNotch: { side: "a", lines: 1 } };
   }
 
   function saveState() {
@@ -70,9 +86,45 @@
     return s || null;
   }
 
-  function getMainName() {
-    if (state.channels.includes(state.mainChannel)) return state.mainChannel;
-    return state.channels[0] || null;
+  // ---- Split-mode zones ----
+  //
+  // Zone A is the only bit of state we keep explicitly; zone B is simply
+  // "every other channel", in their relative order within state.channels —
+  // so reordering within B reuses the exact same array-swap as grid mode.
+
+  function getZones() {
+    const a = state.zoneA.filter((c) => state.channels.includes(c));
+    const aSet = new Set(a);
+    const b = state.channels.filter((c) => !aSet.has(c));
+    return { a, b };
+  }
+
+  function zoneOf(name) {
+    return state.zoneA.includes(name) ? "a" : "b";
+  }
+
+  // Keeps zone A sane after channels are added/removed: never empty (when
+  // there's at least one channel) and never *every* channel (so a divider
+  // always has something on both sides) unless there's only one channel.
+  function ensureValidZoneA() {
+    state.zoneA = state.zoneA.filter((c) => state.channels.includes(c));
+    if (state.zoneA.length === 0 && state.channels.length > 0) {
+      state.zoneA = [state.channels[0]];
+    }
+    if (state.zoneA.length === state.channels.length && state.channels.length > 1) {
+      state.zoneA = state.zoneA.slice(0, -1);
+    }
+  }
+
+  // A zone with exactly one channel is shown large with a "PRINCIPAL" badge
+  // and — because of a Twitch player quirk (see promoteAudio comment below
+  // and updatePauseAllButton) — is left out of the global play/pause action.
+  function getSoloName() {
+    if (state.mode !== "split") return null;
+    const { a, b } = getZones();
+    if (a.length === 1) return a[0];
+    if (b.length === 1) return b[0];
+    return null;
   }
 
   // ---- Tile lifecycle (created once per channel) ----
@@ -102,11 +154,12 @@
 
     // Drag handle: pointer capture means dragging works even while the
     // cursor passes over other tiles' cross-origin Twitch iframes, which
-    // would otherwise swallow the mouse events entirely.
+    // would otherwise swallow the mouse events entirely. In split mode,
+    // dragging onto the other zone moves the channel there.
     const gripBtn = document.createElement("button");
     gripBtn.className = "iconBtn gripBtn";
     gripBtn.textContent = "⠿";
-    gripBtn.title = "Glisser pour réorganiser";
+    gripBtn.title = "Glisser pour réorganiser ou changer de zone";
     gripBtn.addEventListener("pointerdown", (e) => {
       e.stopPropagation();
       startDragReorder(name, e);
@@ -119,9 +172,9 @@
     promoteBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       if (state.mode === "grid") {
-        switchToFocus(name);
-      } else if (state.mode === "focus" && name !== getMainName()) {
-        setMain(name);
+        switchToSplitSolo(name);
+      } else if (!(state.zoneA.length === 1 && state.zoneA[0] === name)) {
+        setZoneASolo(name);
       }
     });
     row.appendChild(promoteBtn);
@@ -226,14 +279,13 @@
     }
   }
 
-  // Sets who the (unmuted) main channel is, muting every other channel —
-  // only called on an explicit promotion, never on resize/relayout, so a
-  // manual mute/unmute elsewhere is never fought over otherwise.
-  function promoteMain(name) {
-    state.mainChannel = name;
+  // Muting/unmuting is otherwise fully manual (each tile's own Twitch
+  // controls) — this one-off nudge just gives a freshly-made solo video a
+  // sensible default (it plays, everything else goes quiet) instead of
+  // starting silent with no obvious way to fix it.
+  function promoteAudio(name) {
     for (const other of state.channels) {
-      if (other === name) continue;
-      if (state.muted[other] !== true) {
+      if (other !== name && state.muted[other] !== true) {
         state.muted[other] = true;
         setPlayerMuted(other, true);
       }
@@ -247,25 +299,25 @@
   // Twitch's embed player can't reliably resume a paused stream via play()
   // once *any* CSS class/style change has ever touched its tile — verified
   // directly against getPlayerState() (playback gets stuck on "Idle").
-  // Since becoming the focus-mode main tile always applies the "is-main"
-  // class, that one tile is structurally the one this can't fix; it's left
-  // out of the global controls; its own Twitch controls still work fine
-  // since a real click is a genuine user gesture inside the iframe.
-  function nonMainTiles() {
-    const mainName = state.mode === "focus" ? getMainName() : null;
-    return [...tiles.entries()].filter(([name]) => name !== mainName);
+  // Since becoming a solo zone's tile always applies the "is-main" class
+  // (for the badge), that one tile is structurally the one this can't fix;
+  // it's left out of the global controls — its own Twitch controls still
+  // work fine since a real click is a genuine user gesture inside the iframe.
+  function nonSoloTiles() {
+    const soloName = getSoloName();
+    return [...tiles.entries()].filter(([name]) => name !== soloName);
   }
 
   function allPlaying() {
-    const list = nonMainTiles();
+    const list = nonSoloTiles();
     return list.every(([, record]) => record.playing);
   }
 
   function updatePauseAllButton() {
-    const list = nonMainTiles();
+    const list = nonSoloTiles();
     if (list.length === 0) {
-      // Nothing left to control (e.g. a single channel, in focus mode) —
-      // use the main video's own Twitch controls directly instead.
+      // Nothing left to control (e.g. a single channel, or every channel
+      // is the solo one) — use its own Twitch controls directly instead.
       el.pauseAllBtn.disabled = true;
       el.pauseAllBtn.textContent = "⏸ Tout mettre en pause";
       el.pauseAllBtn.title = "Utilisez les contrôles de la vidéo principale";
@@ -283,7 +335,7 @@
 
   el.pauseAllBtn.addEventListener("click", () => {
     const shouldPause = allPlaying();
-    for (const [, record] of nonMainTiles()) {
+    for (const [, record] of nonSoloTiles()) {
       try {
         if (shouldPause) record.player?.pause();
         else record.player?.play();
@@ -317,64 +369,78 @@
       }
     }
     if (added) {
-      if (!state.mainChannel) {
-        if (state.mode === "focus") {
-          promoteMain(state.channels[0]);
-        } else {
-          state.mainChannel = state.channels[0];
-        }
-      }
+      if (state.mode === "split") ensureValidZoneA();
       saveState();
       layoutAll();
+      updatePauseAllButton();
     }
   }
 
   function removeChannel(name) {
     state.channels = state.channels.filter((c) => c !== name);
+    state.zoneA = state.zoneA.filter((c) => c !== name);
     delete state.muted[name];
     destroyTile(name);
-    if (state.mainChannel === name) {
-      const next = state.channels[0] || null;
-      if (next && state.mode === "focus") {
-        promoteMain(next);
-      } else {
-        state.mainChannel = next;
-      }
-    }
+    if (state.mode === "split") ensureValidZoneA();
     saveState();
     layoutAll();
+    updatePauseAllButton();
   }
 
   function setMode(mode) {
     state.mode = mode;
-    // Always (re-)promote the main channel on entering focus mode, even if
-    // one was already set from a previous session — otherwise a main
-    // channel picked while still muted in grid mode would stay silent.
-    if (mode === "focus" && state.channels.length) {
-      promoteMain(getMainName() || state.channels[0]);
-    }
+    if (mode === "split") ensureValidZoneA();
     saveState();
     el.modeGrid.classList.toggle("active", state.mode === "grid");
-    el.modeFocus.classList.toggle("active", state.mode === "focus");
+    el.modeFocus.classList.toggle("active", state.mode === "split");
     layoutAll();
     updatePauseAllButton();
   }
 
-  function setMain(name) {
-    promoteMain(name);
+  // Makes `name` the sole member of zone A (everyone else ends up in zone
+  // B) and gives it the sensible "it plays, everything else is quiet"
+  // audio default. Used by the star button as a one-click shortcut —
+  // fine-grained zone membership is still done by dragging tiles around.
+  function setZoneASolo(name) {
+    state.zoneA = [name];
+    promoteAudio(name);
     saveState();
     layoutAll();
     updatePauseAllButton();
   }
 
-  function switchToFocus(name) {
-    state.mode = "focus";
-    promoteMain(name);
+  function switchToSplitSolo(name) {
+    state.mode = "split";
+    state.zoneA = [name];
+    promoteAudio(name);
     saveState();
     el.modeGrid.classList.toggle("active", false);
     el.modeFocus.classList.toggle("active", true);
     layoutAll();
     updatePauseAllButton();
+  }
+
+  // Moves `name` into `targetZone` ("a" or "b"), inserted right before
+  // `beforeName` if that's given and already in the target zone, else at
+  // the end.
+  function moveToZone(name, targetZone, beforeName) {
+    state.zoneA = state.zoneA.filter((c) => c !== name);
+    if (targetZone === "a") {
+      const idx = beforeName ? state.zoneA.indexOf(beforeName) : -1;
+      if (idx !== -1) state.zoneA.splice(idx, 0, name);
+      else state.zoneA.push(name);
+    }
+    saveState();
+    layoutAll();
+    updatePauseAllButton();
+  }
+
+  function swapChannels(list, nameA, nameB) {
+    const i = list.indexOf(nameA);
+    const j = list.indexOf(nameB);
+    if (i !== -1 && j !== -1) {
+      [list[i], list[j]] = [list[j], list[i]];
+    }
   }
 
   // ---- Layout ----
@@ -404,8 +470,8 @@
   // Lays out `names` inside a box (boxX,boxY,boxW,boxH), maximizing each
   // tile's area, centering the whole block and centering each (possibly
   // partial) row within it — matching how a wrapping flex row with
-  // justify-content:center looks. Used for grid mode and for the focus
-  // sidebar when the main video is at its maximal size.
+  // justify-content:center looks. Used for grid mode and for whichever
+  // split zone isn't the one with a forced line count.
   function packGrid(names, boxX, boxY, boxW, boxH, positions) {
     const n = names.length;
     if (n === 0) return;
@@ -427,106 +493,111 @@
     });
   }
 
-  // Lays out `names` in exactly `cols` columns filling the full box height —
-  // used for the focus sidebar when the user has picked a specific column
-  // count (row orientation: main left, sidebar right).
-  function packFixedCols(names, boxX, boxY, boxH, cols, positions) {
+  // Lays out `names` in exactly `lines` columns (row orientation) or rows
+  // (column orientation), each filling the full cross-axis length — used
+  // for whichever split zone the user pinned to a specific line count.
+  function packForcedLines(names, boxX, boxY, crossLength, lines, isRow, positions) {
     const n = names.length;
-    const rows = Math.ceil(n / cols);
-    const tileH = (boxH - (rows - 1) * GAP) / rows;
-    const tileW = tileH * RATIO;
-    const totalW = cols * tileW + (cols - 1) * GAP;
-
-    names.forEach((name, i) => {
-      const row = Math.floor(i / cols);
-      const col = i % cols;
-      const itemsInRow = Math.min(cols, n - row * cols);
-      const rowW = itemsInRow * tileW + (itemsInRow - 1) * GAP;
-      const rowOffsetX = boxX + (totalW - rowW) / 2;
-      const x = rowOffsetX + col * (tileW + GAP);
-      const y = boxY + row * (tileH + GAP);
-      positions.set(name, { x, y, w: tileW, h: tileH, isMain: false });
-    });
-  }
-
-  // Same as packFixedCols but forcing a row count instead, filling the full
-  // box width — used when the sidebar sits below the main video (column
-  // orientation: main top, sidebar bottom).
-  function packFixedRows(names, boxX, boxY, boxW, rows, positions) {
-    const n = names.length;
-    const cols = Math.ceil(n / rows);
-    const tileW = (boxW - (cols - 1) * GAP) / cols;
-    const tileH = tileW / RATIO;
-
-    names.forEach((name, i) => {
-      const row = Math.floor(i / cols);
-      const col = i % cols;
-      const itemsInRow = Math.min(cols, n - row * cols);
-      const rowW = itemsInRow * tileW + (itemsInRow - 1) * GAP;
-      const rowOffsetX = boxX + (boxW - rowW) / 2;
-      const x = rowOffsetX + col * (tileW + GAP);
-      const y = boxY + row * (tileH + GAP);
-      positions.set(name, { x, y, w: tileW, h: tileH, isMain: false });
-    });
-  }
-
-  function computeMainFit(areaW, areaH) {
-    let w, h;
-    if (areaW / areaH > RATIO) {
-      h = areaH;
-      w = h * RATIO;
-    } else {
-      w = areaW;
-      h = w / RATIO;
-    }
-    return { w, h };
-  }
-
-  // The area the main video gets for a given layout "option":
-  //  - option 0: the main video is as large as the available height (row
-  //    orientation) or width (column orientation) allows — its maximal size.
-  //  - option k (1..otherCount): the sidebar is forced into exactly k
-  //    columns (row orientation) or k rows (column orientation), each
-  //    filling the full cross-axis, and the main video gets whatever
-  //    space is left.
-  // These are the only layouts where either the main video or the sidebar
-  // is truly maximized — anything in between wastes space on one side.
-  function computeMainArea(option, otherCount, availW, availH, isRow) {
-    if (option === 0) {
-      if (isRow) {
-        const mainAreaH = availH;
-        const idealW = mainAreaH * RATIO;
-        const maxW = Math.max(availW - HANDLE_SIZE - MIN_SIDE, availW * 0.2);
-        return { mainAreaW: Math.min(idealW, maxW), mainAreaH };
-      }
-      const mainAreaW = availW;
-      const idealH = mainAreaW / RATIO;
-      const maxH = Math.max(availH - HANDLE_SIZE - MIN_SIDE, availH * 0.2);
-      return { mainAreaW, mainAreaH: Math.min(idealH, maxH) };
-    }
     if (isRow) {
-      const rows = Math.ceil(otherCount / option);
+      const cols = lines;
+      const rows = Math.ceil(n / cols);
+      const tileH = (crossLength - (rows - 1) * GAP) / rows;
+      const tileW = tileH * RATIO;
+      const totalW = cols * tileW + (cols - 1) * GAP;
+      names.forEach((name, i) => {
+        const row = Math.floor(i / cols);
+        const col = i % cols;
+        const itemsInRow = Math.min(cols, n - row * cols);
+        const rowW = itemsInRow * tileW + (itemsInRow - 1) * GAP;
+        const rowOffsetX = boxX + (totalW - rowW) / 2;
+        const x = rowOffsetX + col * (tileW + GAP);
+        const y = boxY + row * (tileH + GAP);
+        positions.set(name, { x, y, w: tileW, h: tileH, isMain: false });
+      });
+    } else {
+      const rows = lines;
+      const cols = Math.ceil(n / rows);
+      const tileW = (crossLength - (cols - 1) * GAP) / cols;
+      const tileH = tileW / RATIO;
+      names.forEach((name, i) => {
+        const row = Math.floor(i / cols);
+        const col = i % cols;
+        const itemsInRow = Math.min(cols, n - row * cols);
+        const rowW = itemsInRow * tileW + (itemsInRow - 1) * GAP;
+        const rowOffsetX = boxX + (crossLength - rowW) / 2;
+        const x = rowOffsetX + col * (tileW + GAP);
+        const y = boxY + row * (tileH + GAP);
+        positions.set(name, { x, y, w: tileW, h: tileH, isMain: false });
+      });
+    }
+  }
+
+  // The along-axis size that `count` items forced into `lines` lines
+  // (filling the full cross-axis) end up occupying.
+  function computeForcedSize(count, lines, availW, availH, isRow) {
+    if (isRow) {
+      const rows = Math.ceil(count / lines);
       const tileH = (availH - (rows - 1) * GAP) / rows;
       const tileW = tileH * RATIO;
-      const sidebarW = option * tileW + (option - 1) * GAP;
-      return { mainAreaW: Math.max(availW - sidebarW - HANDLE_SIZE, 20), mainAreaH: availH };
+      return lines * tileW + (lines - 1) * GAP;
     }
-    const cols = Math.ceil(otherCount / option);
+    const cols = Math.ceil(count / lines);
     const tileW = (availW - (cols - 1) * GAP) / cols;
     const tileH = tileW / RATIO;
-    const sidebarH = option * tileH + (option - 1) * GAP;
-    return { mainAreaW: availW, mainAreaH: Math.max(availH - sidebarH - HANDLE_SIZE, 20) };
+    return lines * tileH + (lines - 1) * GAP;
+  }
+
+  // The only layouts where either zone is truly maximized: zone A forced
+  // into 1..aCount lines (zone B gets whatever's left, best-packed), or
+  // symmetrically zone B forced into 1..bCount lines. Anything in between
+  // wastes space on one side, so those are the only notches the divider
+  // can rest on. Each notch records zone A's resulting along-axis size,
+  // used both to render it and to find the notch closest to the pointer.
+  function computeSplitNotches(aCount, bCount, availW, availH, isRow) {
+    const availAxis = isRow ? availW : availH;
+    const notches = [];
+    for (let lines = 1; lines <= aCount; lines++) {
+      const size = computeForcedSize(aCount, lines, availW, availH, isRow);
+      notches.push({ side: "a", lines, aSize: clamp(20, size, availAxis - HANDLE_SIZE - MIN_OTHER_SIDE) });
+    }
+    for (let lines = 1; lines <= bCount; lines++) {
+      const bSize = computeForcedSize(bCount, lines, availW, availH, isRow);
+      const aSize = clamp(MIN_OTHER_SIDE, availAxis - bSize - HANDLE_SIZE, availAxis - HANDLE_SIZE - 20);
+      notches.push({ side: "b", lines, aSize });
+    }
+    return notches;
+  }
+
+  function resolveNotch(stored, notches) {
+    if (stored) {
+      const exact = notches.find((n) => n.side === stored.side && n.lines === stored.lines);
+      if (exact) return exact;
+      const sameSide = notches.filter((n) => n.side === stored.side);
+      if (sameSide.length) {
+        const maxLines = Math.max(...sameSide.map((n) => n.lines));
+        const clampedLines = clamp(1, stored.lines, maxLines);
+        const found = sameSide.find((n) => n.lines === clampedLines);
+        if (found) return found;
+      }
+    }
+    return notches[0];
   }
 
   function clamp(min, val, max) {
     return Math.max(min, Math.min(max, val));
   }
 
-  function layoutAll(overrideOption) {
+  // Geometry from the last layout, used by the tile-drag code to figure
+  // out which zone the pointer is over even when it's not on top of a tile
+  // (e.g. dropped on empty space within a zone).
+  let lastSplitGeometry = null;
+
+  function layoutAll(overrideNotch) {
     const hasChannels = state.channels.length > 0;
     el.emptyState.style.display = hasChannels ? "none" : "flex";
     if (!hasChannels) {
       el.focusHandle.classList.remove("visible");
+      lastSplitGeometry = null;
       return;
     }
 
@@ -535,52 +606,50 @@
     const availH = rect.height - GAP * 2;
     const positions = new Map();
     let handleBox = null;
+    lastSplitGeometry = null;
 
     if (state.mode === "grid") {
       packGrid(state.channels, GAP, GAP, availW, availH, positions);
     } else {
-      const mainName = getMainName();
-      const others = state.channels.filter((c) => c !== mainName);
+      // Note: zone A is *not* auto-repaired here — the user may have
+      // deliberately dragged every tile to one side, which should render
+      // as a plain grid (below) rather than being silently undone.
+      const { a, b } = getZones();
       const isRow = availW >= availH;
 
-      if (others.length === 0) {
-        const fit = computeMainFit(availW, availH);
-        positions.set(mainName, {
-          x: GAP + (availW - fit.w) / 2,
-          y: GAP + (availH - fit.h) / 2,
-          w: fit.w,
-          h: fit.h,
-          isMain: true,
-        });
+      if (a.length === 0 || b.length === 0) {
+        packGrid(state.channels, GAP, GAP, availW, availH, positions);
       } else {
-        const option = clamp(0, overrideOption ?? state.focusLayoutOption, others.length);
-        const { mainAreaW, mainAreaH } = computeMainArea(option, others.length, availW, availH, isRow);
-        const fit = computeMainFit(mainAreaW, mainAreaH);
-        positions.set(mainName, {
-          x: GAP + (mainAreaW - fit.w) / 2,
-          y: GAP + (mainAreaH - fit.h) / 2,
-          w: fit.w,
-          h: fit.h,
-          isMain: true,
-        });
+        const notches = computeSplitNotches(a.length, b.length, availW, availH, isRow);
+        const chosen = resolveNotch(overrideNotch ?? state.splitNotch, notches);
+        const aSize = chosen.aSize;
 
         if (isRow) {
-          const sidebarX = GAP + mainAreaW + HANDLE_SIZE;
-          if (option === 0) {
-            packGrid(others, sidebarX, GAP, availW - mainAreaW - HANDLE_SIZE, availH, positions);
-          } else {
-            packFixedCols(others, sidebarX, GAP, availH, option, positions);
-          }
-          handleBox = { x: GAP + mainAreaW, y: GAP, w: HANDLE_SIZE, h: availH, orientation: "row" };
+          if (chosen.side === "a") packForcedLines(a, GAP, GAP, availH, chosen.lines, true, positions);
+          else packGrid(a, GAP, GAP, aSize, availH, positions);
+
+          const bX = GAP + aSize + HANDLE_SIZE;
+          const bW = availW - aSize - HANDLE_SIZE;
+          if (chosen.side === "b") packForcedLines(b, bX, GAP, availH, chosen.lines, true, positions);
+          else packGrid(b, bX, GAP, bW, availH, positions);
+
+          handleBox = { x: GAP + aSize, y: GAP, w: HANDLE_SIZE, h: availH, orientation: "row" };
+          lastSplitGeometry = { isRow: true, splitAt: GAP + aSize };
         } else {
-          const sidebarY = GAP + mainAreaH + HANDLE_SIZE;
-          if (option === 0) {
-            packGrid(others, GAP, sidebarY, availW, availH - mainAreaH - HANDLE_SIZE, positions);
-          } else {
-            packFixedRows(others, GAP, sidebarY, availW, option, positions);
-          }
-          handleBox = { x: GAP, y: GAP + mainAreaH, w: availW, h: HANDLE_SIZE, orientation: "col" };
+          if (chosen.side === "a") packForcedLines(a, GAP, GAP, availW, chosen.lines, false, positions);
+          else packGrid(a, GAP, GAP, availW, aSize, positions);
+
+          const bY = GAP + aSize + HANDLE_SIZE;
+          const bH = availH - aSize - HANDLE_SIZE;
+          if (chosen.side === "b") packForcedLines(b, GAP, bY, availW, chosen.lines, false, positions);
+          else packGrid(b, GAP, bY, availW, bH, positions);
+
+          handleBox = { x: GAP, y: GAP + aSize, w: availW, h: HANDLE_SIZE, orientation: "col" };
+          lastSplitGeometry = { isRow: false, splitAt: GAP + aSize };
         }
+
+        if (a.length === 1) positions.get(a[0]).isMain = true;
+        if (b.length === 1) positions.get(b[0]).isMain = true;
       }
     }
 
@@ -595,12 +664,12 @@
       record.el.style.top = `${Math.round(pos.y)}px`;
       record.el.style.width = `${Math.floor(pos.w)}px`;
       record.el.style.height = `${Math.floor(pos.h)}px`;
-      record.el.classList.toggle("is-main", pos.isMain);
-      // The promote button does nothing for the tile that's already the
-      // interactive main video — hide it there instead of leaving a dead button.
-      const isPromotable = state.mode === "grid" || !pos.isMain;
+      record.el.classList.toggle("is-main", !!pos.isMain);
+      // The promote button does nothing for a tile that's already the
+      // lone member of zone A — hide it there instead of a dead button.
+      const isPromotable = !(state.mode === "split" && state.zoneA.length === 1 && state.zoneA[0] === name);
       record.promoteBtn.classList.toggle("hidden", !isPromotable);
-      record.promoteBtn.title = state.mode === "grid" ? "Agrandir en focus" : "Passer en principal";
+      record.promoteBtn.title = state.mode === "grid" ? "Basculer en vue partagée" : "Mettre en avant seul(e)";
     }
 
     if (handleBox) {
@@ -616,37 +685,25 @@
     }
   }
 
-  // ---- Drag to resize the main video ----
+  // ---- Drag to resize the split ----
   //
   // The handle doesn't move freely: it only ever rests at one of the
-  // "optimal" layouts computed by computeMainArea (main maximal, or the
-  // sidebar in exactly 1/2/3/... columns), so dragging picks whichever of
-  // those is closest to the pointer instead of any arbitrary position.
+  // "optimal" notches from computeSplitNotches, so dragging picks whichever
+  // is closest to the pointer instead of any arbitrary position.
 
   let dragging = false;
-  let dragOption = null;
-
-  function pickNearestOption(rawMainSize, otherCount, availW, availH, isRow) {
-    let bestOption = 0;
-    let bestDiff = Infinity;
-    for (let k = 0; k <= otherCount; k++) {
-      const area = computeMainArea(k, otherCount, availW, availH, isRow);
-      const size = isRow ? area.mainAreaW : area.mainAreaH;
-      const diff = Math.abs(size - rawMainSize);
-      if (diff < bestDiff) {
-        bestDiff = diff;
-        bestOption = k;
-      }
-    }
-    return bestOption;
-  }
+  let dragNotch = null;
 
   el.focusHandle.addEventListener("pointerdown", (e) => {
     if (!el.focusHandle.classList.contains("visible")) return;
     dragging = true;
-    dragOption = state.focusLayoutOption;
+    dragNotch = state.splitNotch;
     el.focusHandle.classList.add("dragging");
-    el.focusHandle.setPointerCapture(e.pointerId);
+    try {
+      el.focusHandle.setPointerCapture(e.pointerId);
+    } catch (e2) {
+      /* ignore */
+    }
   });
 
   el.focusHandle.addEventListener("pointermove", (e) => {
@@ -655,69 +712,123 @@
     const availW = rect.width - GAP * 2;
     const availH = rect.height - GAP * 2;
     const isRow = el.focusHandle.classList.contains("row");
-    const rawMainSize = isRow ? e.clientX - rect.left - GAP : e.clientY - rect.top - GAP;
-    const otherCount = Math.max(0, state.channels.length - 1);
-    dragOption = pickNearestOption(rawMainSize, otherCount, availW, availH, isRow);
-    layoutAll(dragOption);
+    const rawASize = isRow ? e.clientX - rect.left - GAP : e.clientY - rect.top - GAP;
+    const { a, b } = getZones();
+    const notches = computeSplitNotches(a.length, b.length, availW, availH, isRow);
+    let best = notches[0];
+    let bestDiff = Infinity;
+    for (const n of notches) {
+      const diff = Math.abs(n.aSize - rawASize);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        best = n;
+      }
+    }
+    dragNotch = { side: best.side, lines: best.lines };
+    layoutAll(dragNotch);
   });
 
   function endDrag() {
     if (!dragging) return;
     dragging = false;
     el.focusHandle.classList.remove("dragging");
-    if (dragOption !== null) {
-      state.focusLayoutOption = dragOption;
+    if (dragNotch) {
+      state.splitNotch = dragNotch;
       saveState();
     }
   }
   el.focusHandle.addEventListener("pointerup", endDrag);
   el.focusHandle.addEventListener("pointercancel", endDrag);
 
-  // ---- Drag to reorder tiles ----
+  // ---- Drag to reorder tiles / move them between zones ----
 
   let reorderSource = null;
   let reorderTarget = null;
+  let reorderHoverZone = null;
+
+  function zoneFromPoint(clientX, clientY) {
+    if (!lastSplitGeometry) return null;
+    const rect = el.stage.getBoundingClientRect();
+    return lastSplitGeometry.isRow
+      ? clientX - rect.left < lastSplitGeometry.splitAt
+        ? "a"
+        : "b"
+      : clientY - rect.top < lastSplitGeometry.splitAt
+        ? "a"
+        : "b";
+  }
 
   function startDragReorder(name, downEvent) {
     reorderSource = name;
     reorderTarget = null;
+    reorderHoverZone = null;
     const grip = downEvent.currentTarget;
     tiles.get(name)?.el.classList.add("drag-source");
 
     const onMove = (e) => {
       const hit = document.elementFromPoint(e.clientX, e.clientY);
       const tileEl = hit && hit.closest(".tile");
-      const targetName = tileEl && tileEl.dataset.channel;
+      const targetName = tileEl && tileEl.dataset.channel !== reorderSource ? tileEl.dataset.channel : null;
       if (targetName !== reorderTarget) {
         if (reorderTarget) tiles.get(reorderTarget)?.el.classList.remove("drag-target");
-        reorderTarget = targetName && targetName !== reorderSource ? targetName : null;
+        reorderTarget = targetName;
         if (reorderTarget) tiles.get(reorderTarget)?.el.classList.add("drag-target");
+      }
+      if (state.mode === "split") {
+        reorderHoverZone = reorderTarget ? zoneOf(reorderTarget) : zoneFromPoint(e.clientX, e.clientY);
       }
     };
 
     const onUp = () => {
-      grip.releasePointerCapture(downEvent.pointerId);
+      try {
+        grip.releasePointerCapture(downEvent.pointerId);
+      } catch (e) {
+        /* ignore */
+      }
       grip.removeEventListener("pointermove", onMove);
       grip.removeEventListener("pointerup", onUp);
       grip.removeEventListener("pointercancel", onUp);
       tiles.get(reorderSource)?.el.classList.remove("drag-source");
-      if (reorderTarget) {
-        tiles.get(reorderTarget)?.el.classList.remove("drag-target");
-        const i = state.channels.indexOf(reorderSource);
-        const j = state.channels.indexOf(reorderTarget);
-        if (i !== -1 && j !== -1) {
-          [state.channels[i], state.channels[j]] = [state.channels[j], state.channels[i]];
+      if (reorderTarget) tiles.get(reorderTarget)?.el.classList.remove("drag-target");
+
+      if (state.mode === "grid") {
+        if (reorderTarget) {
+          swapChannels(state.channels, reorderSource, reorderTarget);
           saveState();
           layoutAll();
         }
+      } else {
+        const sourceZone = zoneOf(reorderSource);
+        const targetZone = reorderTarget ? zoneOf(reorderTarget) : reorderHoverZone;
+        if (targetZone && targetZone === sourceZone) {
+          if (reorderTarget) {
+            if (sourceZone === "a") swapChannels(state.zoneA, reorderSource, reorderTarget);
+            else swapChannels(state.channels, reorderSource, reorderTarget);
+            saveState();
+            layoutAll();
+          }
+        } else if (targetZone && targetZone !== sourceZone) {
+          // Never let a drag fully empty a zone — with no tile left there,
+          // there'd be no divider to drag through to get one back.
+          const sourceCount = getZones()[sourceZone].length;
+          if (sourceCount > 1 || state.channels.length <= 1) {
+            moveToZone(reorderSource, targetZone, reorderTarget);
+          }
+        }
       }
+
       reorderSource = null;
       reorderTarget = null;
+      reorderHoverZone = null;
     };
 
-    grip.setPointerCapture(downEvent.pointerId);
     grip.addEventListener("pointermove", onMove);
     grip.addEventListener("pointerup", onUp);
+    try {
+      grip.setPointerCapture(downEvent.pointerId);
+    } catch (e) {
+      /* ignore — listeners above still work without capture */
+    }
     grip.addEventListener("pointercancel", onUp);
   }
 
@@ -733,7 +844,7 @@
   });
 
   el.modeGrid.addEventListener("click", () => setMode("grid"));
-  el.modeFocus.addEventListener("click", () => setMode("focus"));
+  el.modeFocus.addEventListener("click", () => setMode("split"));
 
   el.fullscreenBtn.addEventListener("click", () => {
     if (!document.fullscreenElement) {
@@ -754,7 +865,7 @@
 
   function init() {
     el.modeGrid.classList.toggle("active", state.mode === "grid");
-    el.modeFocus.classList.toggle("active", state.mode === "focus");
+    el.modeFocus.classList.toggle("active", state.mode === "split");
     for (const name of state.channels) {
       createTile(name);
     }
