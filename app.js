@@ -32,7 +32,10 @@
   // repositions these elements, never recreates the underlying Twitch
   // player/iframe.
   const tiles = new Map();
-  if (location.search.includes("debug")) window.__tiles = tiles;
+  if (location.search.includes("debug")) {
+    window.__tiles = tiles;
+    window.__state = state;
+  }
 
   // container id -> DOM handles for its chrome (grip/toolbar).
   const containerBoxes = new Map();
@@ -861,6 +864,102 @@
     rec.el.style.height = `${Math.round(d.rect.h)}px`;
   }
 
+  // Total number of channels under a layout node, used to size the "ideal"
+  // grid on each side of a divider (nested splits are just summed — a
+  // reasonable approximation of how tightly that whole side will pack).
+  function countChannelsInSubtree(node) {
+    if (!node) return 0;
+    if (node.type === "leaf") {
+      const c = getContainer(node.containerId);
+      return c ? c.channels.length : 0;
+    }
+    return countChannelsInSubtree(node.children[0]) + countChannelsInSubtree(node.children[1]);
+  }
+
+  // How much of a (boxW x boxH) pane's area is left over once `n` tiles are
+  // packed into it at 16:9 — the thing we're trying to minimize on both
+  // sides of a divider at once.
+  function paneWastedPx(n, boxW, boxH) {
+    if (n <= 0) return 0;
+    const w = Math.max(0, boxW - GAP * 2);
+    const h = Math.max(0, boxH - GAP * 2);
+    if (w <= 0 || h <= 0) return w * h;
+    const packed = computeGrid(n, w, h, RATIO, GAP);
+    return Math.max(0, w * h - n * packed.w * packed.h);
+  }
+
+  // The ratios a divider should snap to: the ones that leave the least
+  // unused space on both sides combined ("ideal" positions), plus a few
+  // evenly-spaced in-between ones whenever two ideal spots are far apart —
+  // so dragging feels like choosing from a short list of good layouts
+  // rather than a fully free, continuous resize.
+  function computeSnapRatios(n1, n2, totalPx, crossPx, minPx) {
+    const avail = totalPx - GAP;
+    const lo = clamp(0, minPx, avail);
+    const hi = clamp(lo, avail - minPx, avail);
+    if (hi <= lo) return [0.5];
+
+    const waste = (s) => paneWastedPx(n1, s, crossPx) + paneWastedPx(n2, avail - GAP - s, crossPx);
+    const step = Math.max(2, Math.round((hi - lo) / 300));
+    const samples = [];
+    for (let s = lo; s <= hi; s += step) samples.push({ s, waste: waste(s) });
+    if (samples[samples.length - 1].s !== hi) samples.push({ s: hi, waste: waste(hi) });
+
+    const notches = [];
+    samples.forEach((cur, i) => {
+      const prev = samples[i - 1];
+      const next = samples[i + 1];
+      const isEdge = i === 0 || i === samples.length - 1;
+      const isLocalMin = (!prev || cur.waste <= prev.waste) && (!next || cur.waste <= next.waste);
+      if ((isLocalMin || isEdge) && (!notches.length || cur.s - notches[notches.length - 1] > step)) {
+        notches.push(cur.s);
+      }
+    });
+
+    const maxGap = Math.max(minPx * 1.4, (hi - lo) * 0.18);
+    const filled = [];
+    notches.forEach((s, i) => {
+      filled.push(s);
+      const next = notches[i + 1];
+      if (next === undefined) return;
+      const extra = Math.floor((next - s) / maxGap);
+      for (let k = 1; k <= extra; k++) filled.push(s + ((next - s) * k) / (extra + 1));
+    });
+
+    return filled.map((s) => clamp(0, s / avail, 1));
+  }
+
+  // Small tick marks shown along a divider's track while it's being
+  // dragged, one per snap ratio, so it's visible which discrete positions
+  // are on offer instead of it just feeling like it randomly "sticks".
+  let snapTickEls = [];
+
+  function showSnapTicks(dir, parentRect, snapRatios) {
+    clearSnapTicks();
+    const avail = (dir === "horizontal" ? parentRect.w : parentRect.h) - GAP;
+    for (const r of snapRatios) {
+      const tick = document.createElement("div");
+      tick.className = `snapTick ${dir}`;
+      const offset = clamp(0, Math.round(avail * r), avail) + GAP / 2;
+      if (dir === "horizontal") {
+        tick.style.left = `${Math.round(parentRect.x + offset)}px`;
+        tick.style.top = `${Math.round(parentRect.y)}px`;
+        tick.style.height = `${Math.round(parentRect.h)}px`;
+      } else {
+        tick.style.top = `${Math.round(parentRect.y + offset)}px`;
+        tick.style.left = `${Math.round(parentRect.x)}px`;
+        tick.style.width = `${Math.round(parentRect.w)}px`;
+      }
+      el.containersLayer.appendChild(tick);
+      snapTickEls.push(tick);
+    }
+  }
+
+  function clearSnapTicks() {
+    for (const t of snapTickEls) t.remove();
+    snapTickEls = [];
+  }
+
   function startResizeDivider(splitId, downEvent) {
     const handle = downEvent.currentTarget;
     const meta = dividerMeta.get(splitId);
@@ -869,19 +968,32 @@
     const rec = dividerEls.get(splitId);
     rec?.el.classList.add("dragging");
 
+    const totalPx = dir === "horizontal" ? parentRect.w : parentRect.h;
+    const crossPx = dir === "horizontal" ? parentRect.h : parentRect.w;
+    const minPx = dir === "horizontal" ? MIN_CONTAINER_W : MIN_CONTAINER_H;
+    const n1 = countChannelsInSubtree(node.children[0]);
+    const n2 = countChannelsInSubtree(node.children[1]);
+    const snapRatios = computeSnapRatios(n1, n2, totalPx, crossPx, minPx);
+    showSnapTicks(dir, parentRect, snapRatios);
+
     const startX = downEvent.clientX;
     const startY = downEvent.clientY;
     const startRatio = node.ratio;
-    const minFrac = clamp(
-      0.05,
-      dir === "horizontal" ? MIN_CONTAINER_W / parentRect.w : MIN_CONTAINER_H / parentRect.h,
-      0.45
-    );
 
     const onMove = (e) => {
       const delta =
         dir === "horizontal" ? (e.clientX - startX) / parentRect.w : (e.clientY - startY) / parentRect.h;
-      node.ratio = clamp(minFrac, startRatio + delta, 1 - minFrac);
+      const rawRatio = clamp(0, startRatio + delta, 1);
+      let snapped = snapRatios[0];
+      let bestDist = Infinity;
+      for (const r of snapRatios) {
+        const dist = Math.abs(r - rawRatio);
+        if (dist < bestDist) {
+          bestDist = dist;
+          snapped = r;
+        }
+      }
+      node.ratio = snapped;
       layoutAll();
     };
 
@@ -895,6 +1007,7 @@
       handle.removeEventListener("pointerup", onUp);
       handle.removeEventListener("pointercancel", onUp);
       rec?.el.classList.remove("dragging");
+      clearSnapTicks();
       saveState();
     };
 

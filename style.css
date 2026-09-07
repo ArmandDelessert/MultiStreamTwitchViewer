@@ -535,6 +535,17 @@ body {
   background: var(--accent);
 }
 
+/* One per snap position, shown along a divider's track while it's being
+   dragged, so the finite set of positions it can land on is visible. */
+.snapTick {
+  position: absolute;
+  pointer-events: none;
+  z-index: 4;
+  background: rgba(239, 239, 241, 0.16);
+}
+.snapTick.horizontal { width: 2px; }
+.snapTick.vertical { height: 2px; }
+
 /* Shown while dragging a container's grip over another container, to
    preview where it will dock (an edge strip) or that it will swap places
    (the whole container, dashed). */
