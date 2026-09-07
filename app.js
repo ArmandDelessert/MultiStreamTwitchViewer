@@ -16,7 +16,6 @@
 
   const el = {
     stage: document.getElementById("stage"),
-    emptyState: document.getElementById("emptyState"),
     tilesLayer: document.getElementById("tilesLayer"),
     containersLayer: document.getElementById("containersLayer"),
     addForm: document.getElementById("addForm"),
@@ -180,21 +179,6 @@
     return state.containers.find((c) => c.channels.includes(name)) || null;
   }
 
-  // Removes any container left with zero channels, unless that would leave
-  // none at all (keep one empty container as the drop target / empty state).
-  function pruneEmptyContainers() {
-    const nonEmpty = state.containers.filter((c) => c.channels.length > 0);
-    if (nonEmpty.length > 0 && nonEmpty.length < state.containers.length) {
-      for (const c of state.containers) {
-        if (c.channels.length === 0) {
-          state.layout = removeLeaf(state.layout, c.id);
-          destroyContainerBox(c.id);
-        }
-      }
-      state.containers = nonEmpty;
-    }
-  }
-
   function defaultContainer() {
     return { id: uid(), channels: [] };
   }
@@ -253,9 +237,12 @@
     return best || state.containers[0];
   }
 
+  // Adds a new, empty container docked next to the one currently taking up
+  // the most space — it never moves existing videos; the new container
+  // shows its own "add a channel" field until something is added to it.
   function addContainer() {
+    const c = defaultContainer();
     if (state.containers.length === 0) {
-      const c = defaultContainer();
       state.containers.push(c);
       state.layout = { type: "leaf", containerId: c.id };
       saveState();
@@ -264,29 +251,37 @@
     }
 
     const donor = pickSplitDonor();
-    const half = donor.channels.slice(Math.ceil(donor.channels.length / 2));
-    donor.channels = donor.channels.slice(0, Math.ceil(donor.channels.length / 2));
-
     const donorRect = containerRects.get(donor.id);
     const edge = !donorRect || donorRect.w >= donorRect.h ? "right" : "bottom";
 
-    const next = { id: uid(), channels: half };
-    state.containers.push(next);
-    state.layout = insertLeaf(state.layout, donor.id, { type: "leaf", containerId: next.id }, edge);
+    state.containers.push(c);
+    state.layout = insertLeaf(state.layout, donor.id, { type: "leaf", containerId: c.id }, edge);
 
-    pruneEmptyContainers();
     saveState();
     layoutAll();
   }
 
+  // Closing a container is always allowed, including the last one: its
+  // videos (if any) merge into another container, or if it was the only
+  // one left, they're simply dropped and a fresh empty container takes its
+  // place — this is the "clear everything" affordance.
   function removeContainer(id) {
-    if (state.containers.length <= 1) return;
     const idx = state.containers.findIndex((c) => c.id === id);
     if (idx === -1) return;
     const [removed] = state.containers.splice(idx, 1);
-    const target = state.containers[0];
-    target.channels.push(...removed.channels);
-    state.layout = removeLeaf(state.layout, id);
+    if (state.containers.length === 0) {
+      for (const name of removed.channels) {
+        delete state.muted[name];
+        destroyTile(name);
+      }
+      const c = defaultContainer();
+      state.containers.push(c);
+      state.layout = { type: "leaf", containerId: c.id };
+    } else {
+      const target = state.containers[0];
+      target.channels.push(...removed.channels);
+      state.layout = removeLeaf(state.layout, id);
+    }
     destroyContainerBox(id);
     saveState();
     layoutAll();
@@ -302,7 +297,6 @@
     const idx = beforeName ? target.channels.indexOf(beforeName) : -1;
     if (idx !== -1) target.channels.splice(idx, 0, name);
     else target.channels.push(name);
-    pruneEmptyContainers();
     saveState();
     layoutAll();
   }
@@ -478,14 +472,21 @@
   // ---- State mutations ----
 
   function addChannels(input) {
-    const parts = input.split(",").map(normalizeChannel).filter(Boolean);
-    let added = false;
     if (state.containers.length === 0) {
       const c = defaultContainer();
       state.containers.push(c);
       state.layout = { type: "leaf", containerId: c.id };
     }
-    const target = state.containers[0];
+    addChannelsToContainer(state.containers[0].id, input);
+  }
+
+  // Same as addChannels, but into a specific container — used by each
+  // empty container's own inline "add a channel" field.
+  function addChannelsToContainer(containerId, input) {
+    const target = getContainer(containerId);
+    if (!target) return;
+    const parts = input.split(",").map(normalizeChannel).filter(Boolean);
+    let added = false;
     const all = getAllChannels();
     for (const name of parts) {
       if (!all.includes(name)) {
@@ -506,7 +507,6 @@
     if (owner) owner.channels = owner.channels.filter((c) => c !== name);
     delete state.muted[name];
     destroyTile(name);
-    pruneEmptyContainers();
     saveState();
     layoutAll();
   }
@@ -599,12 +599,13 @@
   }
 
   function layoutAll() {
-    const hasChannels = getAllChannels().length > 0;
-    el.emptyState.style.display = hasChannels ? "none" : "flex";
-    if (!hasChannels) {
-      for (const id of [...containerBoxes.keys()]) destroyContainerBox(id);
-      for (const id of [...dividerEls.keys()]) destroyDivider(id);
-      return;
+    // Always keep at least one container (possibly empty) so there's
+    // always something on the stage — an empty container shows its own
+    // "add a channel" field instead of a whole-page placeholder.
+    if (state.containers.length === 0) {
+      const c = defaultContainer();
+      state.containers.push(c);
+      state.layout = { type: "leaf", containerId: c.id };
     }
     if (!state.layout) state.layout = buildTreeFromContainers(state.containers);
 
@@ -747,7 +748,7 @@
     const removeBtn = document.createElement("button");
     removeBtn.className = "iconBtn danger";
     removeBtn.textContent = "✕";
-    removeBtn.title = "Fermer ce conteneur (les vidéos rejoignent un autre conteneur)";
+    removeBtn.title = "Fermer ce conteneur";
     removeBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       removeContainer(c.id);
@@ -757,8 +758,33 @@
     chrome.appendChild(extra);
     box.appendChild(chrome);
 
+    // Shown instead of any tiles while this container has no channels yet.
+    const emptyState = document.createElement("form");
+    emptyState.className = "containerEmptyState";
+    emptyState.autocomplete = "off";
+
+    const emptyInput = document.createElement("input");
+    emptyInput.type = "text";
+    emptyInput.placeholder = "Ajouter une chaîne…";
+    emptyState.appendChild(emptyInput);
+
+    const emptySubmit = document.createElement("button");
+    emptySubmit.type = "submit";
+    emptySubmit.textContent = "Ajouter";
+    emptyState.appendChild(emptySubmit);
+
+    emptyState.addEventListener("pointerdown", (e) => e.stopPropagation());
+    emptyState.addEventListener("submit", (e) => {
+      e.preventDefault();
+      if (emptyInput.value.trim()) {
+        addChannelsToContainer(c.id, emptyInput.value);
+        emptyInput.value = "";
+      }
+    });
+    box.appendChild(emptyState);
+
     el.containersLayer.appendChild(box);
-    containerBoxes.set(c.id, { el: box, pauseBtn, muteBtn, removeBtn });
+    containerBoxes.set(c.id, { el: box, pauseBtn, muteBtn, removeBtn, emptyState });
   }
 
   function renderContainerBox(c, px, index) {
@@ -791,7 +817,7 @@
       renderContainerBox(container, containerRects.get(container.id), state.containers.indexOf(container));
     };
 
-    box.removeBtn.classList.toggle("hidden", state.containers.length <= 1);
+    box.emptyState.classList.toggle("hidden", c.channels.length > 0);
   }
 
   // ---- Container dividers (drag the seam between two panes to resize) ----
