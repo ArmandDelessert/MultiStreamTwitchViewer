@@ -7,7 +7,11 @@
   const MIN_CONTAINER_W = 220; // px, enforced at interaction time via the live stage size
   const MIN_CONTAINER_H = 150;
 
-  /** @type {{containers: {id:string, channels:string[], x:number, y:number, w:number, h:number}[], muted: Record<string, boolean>, quality: string}} */
+  // Containers are tiled edge-to-edge across the whole stage, arranged as a
+  // binary tree of splits (no overlap, no gaps left over): a leaf holds one
+  // container's id, a split holds two children side by side ("horizontal")
+  // or stacked ("vertical") with `ratio` giving the first child's share.
+  /** @type {{containers: {id:string, channels:string[]}[], layout: object|null, muted: Record<string, boolean>, quality: string}} */
   let state = loadState();
 
   const el = {
@@ -31,12 +35,20 @@
   const tiles = new Map();
   if (location.search.includes("debug")) window.__tiles = tiles;
 
-  // container id -> DOM handles for its chrome (grip/toolbar/resize handle).
+  // container id -> DOM handles for its chrome (grip/toolbar).
   const containerBoxes = new Map();
 
   // container id -> last-laid-out pixel rect on the stage, used to hit-test
-  // where a dragged tile is dropped when it's not directly over another tile.
+  // where a dragged tile/container is dropped.
   const containerRects = new Map();
+
+  // split-node id -> DOM handle for its divider (the draggable seam between
+  // its two children).
+  const dividerEls = new Map();
+
+  // split-node id -> {node, dir, parentRect} from the last layout pass, used
+  // to resize a divider by dragging it.
+  const dividerMeta = new Map();
 
   function clamp(min, val, max) {
     return Math.max(min, Math.min(max, val));
@@ -44,6 +56,50 @@
 
   function uid() {
     return Math.random().toString(36).slice(2, 9);
+  }
+
+  // Builds a default tiling tree for a list of containers when there's no
+  // (valid) saved layout tree to reuse — alternates split direction so
+  // successive containers don't all stack the same way.
+  function buildTreeFromContainers(containers) {
+    if (containers.length === 0) return null;
+    let tree = { type: "leaf", containerId: containers[0].id };
+    for (let i = 1; i < containers.length; i++) {
+      tree = {
+        id: uid(),
+        type: "split",
+        dir: i % 2 === 1 ? "horizontal" : "vertical",
+        ratio: 0.5,
+        children: [tree, { type: "leaf", containerId: containers[i].id }],
+      };
+    }
+    return tree;
+  }
+
+  function collectLeafIds(node, out) {
+    if (!node) return;
+    if (node.type === "leaf") {
+      out.push(node.containerId);
+      return;
+    }
+    if (!node.children || node.children.length !== 2) throw new Error("malformed split");
+    collectLeafIds(node.children[0], out);
+    collectLeafIds(node.children[1], out);
+  }
+
+  // A saved layout tree is only usable if it references exactly the current
+  // set of container ids (nothing missing, nothing stale).
+  function isValidTree(tree, containers) {
+    if (!tree) return false;
+    try {
+      const ids = [];
+      collectLeafIds(tree, ids);
+      const a = ids.slice().sort();
+      const b = containers.map((c) => c.id).sort();
+      return a.length === b.length && a.every((v, i) => v === b[i]);
+    } catch (e) {
+      return false;
+    }
   }
 
   function loadState() {
@@ -57,24 +113,27 @@
             .map((c) => ({
               id: typeof c.id === "string" ? c.id : uid(),
               channels: c.channels.filter((ch) => typeof ch === "string"),
-              x: clamp(0, Number(c.x) || 0, 0.95),
-              y: clamp(0, Number(c.y) || 0, 0.95),
-              w: clamp(0.05, Number(c.w) || 1, 1),
-              h: clamp(0.05, Number(c.h) || 1, 1),
             }));
+          // Older saves used free-form x/y/w/h geometry instead of a layout
+          // tree; when that (or anything else invalid) is all we have,
+          // rebuild a fresh tiling tree from the containers' channel lists.
+          const layout = isValidTree(parsed.layout, containers)
+            ? parsed.layout
+            : buildTreeFromContainers(containers);
           return {
             containers,
+            layout,
             muted: parsed.muted && typeof parsed.muted === "object" ? parsed.muted : {},
             quality: typeof parsed.quality === "string" ? parsed.quality : "auto",
           };
         }
-        // Migrate the older single-list shape (channels[] + zoneA/mode) into
-        // one full-stage container holding everything.
+        // Migrate the even older single-list shape (channels[] + zoneA/mode)
+        // into one full-stage container holding everything.
         if (Array.isArray(parsed.channels)) {
+          const containers = parsed.channels.length ? [{ id: uid(), channels: parsed.channels }] : [];
           return {
-            containers: parsed.channels.length
-              ? [{ id: uid(), channels: parsed.channels, x: 0, y: 0, w: 1, h: 1 }]
-              : [],
+            containers,
+            layout: buildTreeFromContainers(containers),
             muted: parsed.muted && typeof parsed.muted === "object" ? parsed.muted : {},
             quality: typeof parsed.quality === "string" ? parsed.quality : "auto",
           };
@@ -83,7 +142,7 @@
     } catch (e) {
       console.warn("Failed to load state", e);
     }
-    return { containers: [], muted: {}, quality: "auto" };
+    return { containers: [], layout: null, muted: {}, quality: "auto" };
   }
 
   function saveState() {
@@ -125,67 +184,95 @@
   // none at all (keep one empty container as the drop target / empty state).
   function pruneEmptyContainers() {
     const nonEmpty = state.containers.filter((c) => c.channels.length > 0);
-    if (nonEmpty.length > 0) {
+    if (nonEmpty.length > 0 && nonEmpty.length < state.containers.length) {
       for (const c of state.containers) {
-        if (c.channels.length === 0) destroyContainerBox(c.id);
+        if (c.channels.length === 0) {
+          state.layout = removeLeaf(state.layout, c.id);
+          destroyContainerBox(c.id);
+        }
       }
       state.containers = nonEmpty;
     }
   }
 
   function defaultContainer() {
-    return { id: uid(), channels: [], x: 0, y: 0, w: 1, h: 1 };
+    return { id: uid(), channels: [] };
+  }
+
+  // ---- Layout tree (tiling: leaves hold a container id, splits hold two
+  // children arranged "horizontal" (side by side) or "vertical" (stacked)). ----
+
+  function findLeaf(node, containerId) {
+    if (!node) return null;
+    if (node.type === "leaf") return node.containerId === containerId ? node : null;
+    return findLeaf(node.children[0], containerId) || findLeaf(node.children[1], containerId);
+  }
+
+  // Removes the leaf for `containerId`, collapsing its parent split into
+  // whichever sibling remains.
+  function removeLeaf(node, containerId) {
+    if (!node) return null;
+    if (node.type === "leaf") return node.containerId === containerId ? null : node;
+    const [c0, c1] = node.children;
+    if (c0.type === "leaf" && c0.containerId === containerId) return c1;
+    if (c1.type === "leaf" && c1.containerId === containerId) return c0;
+    node.children = [removeLeaf(c0, containerId), removeLeaf(c1, containerId)];
+    return node;
+  }
+
+  // Replaces the leaf for `targetId` with a new split holding it and
+  // `newLeaf`, on the given edge ("left"/"right"/"top"/"bottom").
+  function insertLeaf(node, targetId, newLeaf, edge) {
+    if (!node) return newLeaf;
+    if (node.type === "leaf") {
+      if (node.containerId !== targetId) return node;
+      const dir = edge === "left" || edge === "right" ? "horizontal" : "vertical";
+      const children = edge === "left" || edge === "top" ? [newLeaf, node] : [node, newLeaf];
+      return { id: uid(), type: "split", dir, ratio: 0.5, children };
+    }
+    node.children = [
+      insertLeaf(node.children[0], targetId, newLeaf, edge),
+      insertLeaf(node.children[1], targetId, newLeaf, edge),
+    ];
+    return node;
+  }
+
+  // Picks the container currently occupying the most on-screen space, to
+  // seed a newly added container from.
+  function pickSplitDonor() {
+    let best = null;
+    let bestArea = -1;
+    for (const c of state.containers) {
+      const r = containerRects.get(c.id);
+      const area = r ? r.w * r.h : 0;
+      if (area > bestArea) {
+        bestArea = area;
+        best = c;
+      }
+    }
+    return best || state.containers[0];
   }
 
   function addContainer() {
     if (state.containers.length === 0) {
-      state.containers.push(defaultContainer());
+      const c = defaultContainer();
+      state.containers.push(c);
+      state.layout = { type: "leaf", containerId: c.id };
       saveState();
       layoutAll();
       return;
     }
 
-    if (state.containers.length === 1) {
-      // The common case: split the one full-stage container in half,
-      // side by side or stacked depending on which way the stage is wider.
-      const only = state.containers[0];
-      const splitVertically = only.w >= only.h;
-      const half = only.channels.slice(Math.ceil(only.channels.length / 2));
-      only.channels = only.channels.slice(0, Math.ceil(only.channels.length / 2));
+    const donor = pickSplitDonor();
+    const half = donor.channels.slice(Math.ceil(donor.channels.length / 2));
+    donor.channels = donor.channels.slice(0, Math.ceil(donor.channels.length / 2));
 
-      const next = { id: uid(), channels: half, x: 0, y: 0, w: 0, h: 0 };
-      if (splitVertically) {
-        next.x = only.x + only.w / 2;
-        next.y = only.y;
-        next.w = only.w / 2;
-        next.h = only.h;
-        only.w = only.w / 2;
-      } else {
-        next.x = only.x;
-        next.y = only.y + only.h / 2;
-        next.w = only.w;
-        next.h = only.h / 2;
-        only.h = only.h / 2;
-      }
-      state.containers.push(next);
-    } else {
-      // Take half of the largest container's channels to seed the new one,
-      // and cascade its default position so it's not stacked exactly on
-      // top of the others.
-      const donor = state.containers.reduce((a, b) => (b.channels.length > a.channels.length ? b : a));
-      const half = donor.channels.slice(Math.ceil(donor.channels.length / 2));
-      donor.channels = donor.channels.slice(0, Math.ceil(donor.channels.length / 2));
-      const n = state.containers.length;
-      const offset = (n * 0.06) % 0.4;
-      state.containers.push({
-        id: uid(),
-        channels: half,
-        x: clamp(0, 0.08 + offset, 0.55),
-        y: clamp(0, 0.08 + offset, 0.55),
-        w: 0.42,
-        h: 0.42,
-      });
-    }
+    const donorRect = containerRects.get(donor.id);
+    const edge = !donorRect || donorRect.w >= donorRect.h ? "right" : "bottom";
+
+    const next = { id: uid(), channels: half };
+    state.containers.push(next);
+    state.layout = insertLeaf(state.layout, donor.id, { type: "leaf", containerId: next.id }, edge);
 
     pruneEmptyContainers();
     saveState();
@@ -199,6 +286,7 @@
     const [removed] = state.containers.splice(idx, 1);
     const target = state.containers[0];
     target.channels.push(...removed.channels);
+    state.layout = removeLeaf(state.layout, id);
     destroyContainerBox(id);
     saveState();
     layoutAll();
@@ -392,7 +480,11 @@
   function addChannels(input) {
     const parts = input.split(",").map(normalizeChannel).filter(Boolean);
     let added = false;
-    if (state.containers.length === 0) state.containers.push(defaultContainer());
+    if (state.containers.length === 0) {
+      const c = defaultContainer();
+      state.containers.push(c);
+      state.layout = { type: "leaf", containerId: c.id };
+    }
     const target = state.containers[0];
     const all = getAllChannels();
     for (const name of parts) {
@@ -468,27 +560,75 @@
     });
   }
 
+  // Walks the tiling tree, writing each leaf's pixel rect into `leafRects`
+  // and collecting one entry per split (its thin divider rect, plus the
+  // full rect it divides, needed to turn a divider drag delta into a ratio).
+  function layoutTree(node, rect, leafRects, dividers) {
+    if (!node) return;
+    if (node.type === "leaf") {
+      leafRects.set(node.containerId, rect);
+      return;
+    }
+    if (node.dir === "horizontal") {
+      const w1 = clamp(0, Math.round((rect.w - GAP) * node.ratio), rect.w - GAP);
+      const rectA = { x: rect.x, y: rect.y, w: w1, h: rect.h };
+      const rectB = { x: rect.x + w1 + GAP, y: rect.y, w: rect.w - GAP - w1, h: rect.h };
+      dividers.push({
+        id: node.id,
+        node,
+        dir: "horizontal",
+        rect: { x: rect.x + w1, y: rect.y, w: GAP, h: rect.h },
+        parentRect: rect,
+      });
+      layoutTree(node.children[0], rectA, leafRects, dividers);
+      layoutTree(node.children[1], rectB, leafRects, dividers);
+    } else {
+      const h1 = clamp(0, Math.round((rect.h - GAP) * node.ratio), rect.h - GAP);
+      const rectA = { x: rect.x, y: rect.y, w: rect.w, h: h1 };
+      const rectB = { x: rect.x, y: rect.y + h1 + GAP, w: rect.w, h: rect.h - GAP - h1 };
+      dividers.push({
+        id: node.id,
+        node,
+        dir: "vertical",
+        rect: { x: rect.x, y: rect.y + h1, w: rect.w, h: GAP },
+        parentRect: rect,
+      });
+      layoutTree(node.children[0], rectA, leafRects, dividers);
+      layoutTree(node.children[1], rectB, leafRects, dividers);
+    }
+  }
+
   function layoutAll() {
     const hasChannels = getAllChannels().length > 0;
     el.emptyState.style.display = hasChannels ? "none" : "flex";
     if (!hasChannels) {
       for (const id of [...containerBoxes.keys()]) destroyContainerBox(id);
+      for (const id of [...dividerEls.keys()]) destroyDivider(id);
       return;
     }
+    if (!state.layout) state.layout = buildTreeFromContainers(state.containers);
 
     const rect = el.stage.getBoundingClientRect();
-    const stageW = rect.width;
-    const stageH = rect.height;
+    const stageRect = { x: 0, y: 0, w: rect.width, h: rect.height };
     const positions = new Map();
+    const leafRects = new Map();
+    const dividers = [];
+    layoutTree(state.layout, stageRect, leafRects, dividers);
 
     syncContainerBoxes();
+    syncDividers(dividers);
 
     state.containers.forEach((c, index) => {
-      const px = { x: c.x * stageW, y: c.y * stageH, w: c.w * stageW, h: c.h * stageH };
+      const px = leafRects.get(c.id) || { x: 0, y: 0, w: 0, h: 0 };
       containerRects.set(c.id, px);
       packGrid(c.channels, px.x + GAP, px.y + GAP, px.w - GAP * 2, px.h - GAP * 2, positions);
       renderContainerBox(c, px, index);
     });
+
+    for (const d of dividers) {
+      renderDivider(d);
+      dividerMeta.set(d.id, { node: d.node, dir: d.dir, parentRect: d.parentRect });
+    }
 
     for (const [name, record] of tiles) {
       const pos = positions.get(name);
@@ -539,10 +679,10 @@
     const gripBtn = document.createElement("button");
     gripBtn.className = "containerGripBtn";
     gripBtn.textContent = "⠿";
-    gripBtn.title = "Glisser pour déplacer ce conteneur";
+    gripBtn.title = "Glisser vers le bord d'un autre conteneur pour l'y ancrer, ou vers son centre pour échanger leurs places";
     gripBtn.addEventListener("pointerdown", (e) => {
       e.stopPropagation();
-      startDragContainer(c.id, e);
+      startDragDock(c.id, e);
     });
     chrome.appendChild(gripBtn);
 
@@ -617,15 +757,6 @@
     chrome.appendChild(extra);
     box.appendChild(chrome);
 
-    const resizeHandle = document.createElement("div");
-    resizeHandle.className = "containerResizeHandle";
-    resizeHandle.title = "Glisser pour redimensionner";
-    resizeHandle.addEventListener("pointerdown", (e) => {
-      e.stopPropagation();
-      startResizeContainer(c.id, e);
-    });
-    box.appendChild(resizeHandle);
-
     el.containersLayer.appendChild(box);
     containerBoxes.set(c.id, { el: box, pauseBtn, muteBtn, removeBtn });
   }
@@ -637,7 +768,6 @@
     box.el.style.top = `${Math.round(px.y)}px`;
     box.el.style.width = `${Math.round(px.w)}px`;
     box.el.style.height = `${Math.round(px.h)}px`;
-    box.el.style.zIndex = String(10 + index);
 
     const playing = allPlayingInContainer(c);
     box.pauseBtn.textContent = playing ? "⏸" : "▶";
@@ -664,90 +794,68 @@
     box.removeBtn.classList.toggle("hidden", state.containers.length <= 1);
   }
 
-  // ---- Drag to move / resize a container ----
+  // ---- Container dividers (drag the seam between two panes to resize) ----
 
-  function bringContainerToFront(id) {
-    const idx = state.containers.findIndex((c) => c.id === id);
-    if (idx === -1 || idx === state.containers.length - 1) return;
-    const [c] = state.containers.splice(idx, 1);
-    state.containers.push(c);
-  }
-
-  function startDragContainer(id, downEvent) {
-    const grip = downEvent.currentTarget;
-    const c = getContainer(id);
-    if (!c) return;
-    bringContainerToFront(id);
-    saveState();
-    layoutAll();
-
-    const box = containerBoxes.get(id);
-    box?.el.classList.add("dragging");
-
-    const rect = el.stage.getBoundingClientRect();
-    const startX = downEvent.clientX;
-    const startY = downEvent.clientY;
-    const startFracX = c.x;
-    const startFracY = c.y;
-
-    const onMove = (e) => {
-      const container = getContainer(id);
-      if (!container) return;
-      const dx = (e.clientX - startX) / rect.width;
-      const dy = (e.clientY - startY) / rect.height;
-      container.x = clamp(0, startFracX + dx, 1 - container.w);
-      container.y = clamp(0, startFracY + dy, 1 - container.h);
-      layoutAll();
-    };
-
-    const onUp = () => {
-      try {
-        grip.releasePointerCapture(downEvent.pointerId);
-      } catch (e) {
-        /* ignore */
-      }
-      grip.removeEventListener("pointermove", onMove);
-      grip.removeEventListener("pointerup", onUp);
-      grip.removeEventListener("pointercancel", onUp);
-      box?.el.classList.remove("dragging");
-      saveState();
-    };
-
-    grip.addEventListener("pointermove", onMove);
-    grip.addEventListener("pointerup", onUp);
-    grip.addEventListener("pointercancel", onUp);
-    try {
-      grip.setPointerCapture(downEvent.pointerId);
-    } catch (e) {
-      /* ignore — listeners above still work without capture */
+  function syncDividers(dividers) {
+    const liveIds = new Set(dividers.map((d) => d.id));
+    for (const id of [...dividerEls.keys()]) {
+      if (!liveIds.has(id)) destroyDivider(id);
+    }
+    for (const d of dividers) {
+      if (!dividerEls.has(d.id)) createDivider(d);
     }
   }
 
-  function startResizeContainer(id, downEvent) {
+  function destroyDivider(id) {
+    const rec = dividerEls.get(id);
+    if (rec) rec.el.remove();
+    dividerEls.delete(id);
+    dividerMeta.delete(id);
+  }
+
+  function createDivider(d) {
+    const divEl = document.createElement("div");
+    divEl.className = "containerDivider";
+    divEl.addEventListener("pointerdown", (e) => {
+      e.stopPropagation();
+      startResizeDivider(d.id, e);
+    });
+    el.containersLayer.appendChild(divEl);
+    dividerEls.set(d.id, { el: divEl });
+  }
+
+  function renderDivider(d) {
+    const rec = dividerEls.get(d.id);
+    if (!rec) return;
+    rec.el.classList.toggle("horizontal", d.dir === "horizontal");
+    rec.el.classList.toggle("vertical", d.dir === "vertical");
+    rec.el.style.left = `${Math.round(d.rect.x)}px`;
+    rec.el.style.top = `${Math.round(d.rect.y)}px`;
+    rec.el.style.width = `${Math.round(d.rect.w)}px`;
+    rec.el.style.height = `${Math.round(d.rect.h)}px`;
+  }
+
+  function startResizeDivider(splitId, downEvent) {
     const handle = downEvent.currentTarget;
-    const c = getContainer(id);
-    if (!c) return;
-    bringContainerToFront(id);
-    saveState();
+    const meta = dividerMeta.get(splitId);
+    if (!meta) return;
+    const { node, dir, parentRect } = meta;
+    const rec = dividerEls.get(splitId);
+    rec?.el.classList.add("dragging");
 
-    const box = containerBoxes.get(id);
-    box?.el.classList.add("resizing");
-
-    const rect = el.stage.getBoundingClientRect();
     const startX = downEvent.clientX;
     const startY = downEvent.clientY;
-    const startW = c.w;
-    const startH = c.h;
-    const minWFrac = MIN_CONTAINER_W / rect.width;
-    const minHFrac = MIN_CONTAINER_H / rect.height;
+    const startRatio = node.ratio;
+    const minFrac = clamp(
+      0.05,
+      dir === "horizontal" ? MIN_CONTAINER_W / parentRect.w : MIN_CONTAINER_H / parentRect.h,
+      0.45
+    );
 
     const onMove = (e) => {
-      const container = getContainer(id);
-      if (!container) return;
-      const dw = (e.clientX - startX) / rect.width;
-      const dh = (e.clientY - startY) / rect.height;
-      container.w = clamp(minWFrac, startW + dw, 1 - container.x);
-      container.h = clamp(minHFrac, startH + dh, 1 - container.y);
+      const delta =
+        dir === "horizontal" ? (e.clientX - startX) / parentRect.w : (e.clientY - startY) / parentRect.h;
+      node.ratio = clamp(minFrac, startRatio + delta, 1 - minFrac);
       layoutAll();
     };
 
@@ -760,7 +868,7 @@
       handle.removeEventListener("pointermove", onMove);
       handle.removeEventListener("pointerup", onUp);
       handle.removeEventListener("pointercancel", onUp);
-      box?.el.classList.remove("resizing");
+      rec?.el.classList.remove("dragging");
       saveState();
     };
 
@@ -774,24 +882,142 @@
     }
   }
 
-  // ---- Drag to reorder tiles / move them between containers ----
-
-  let reorderSource = null;
-  let reorderTarget = null;
-  let reorderHoverContainer = null;
+  // ---- Drag a container's grip onto another container's edge to dock it
+  // there (splitting that container's spot), or onto its center to swap
+  // the two containers' positions. ----
 
   function containerFromPoint(clientX, clientY) {
     const rect = el.stage.getBoundingClientRect();
     const x = clientX - rect.left;
     const y = clientY - rect.top;
-    let found = null;
     for (const c of state.containers) {
       const px = containerRects.get(c.id);
       if (!px) continue;
-      if (x >= px.x && x <= px.x + px.w && y >= px.y && y <= px.y + px.h) found = c.id;
+      if (x >= px.x && x <= px.x + px.w && y >= px.y && y <= px.y + px.h) return { id: c.id, x, y };
     }
-    return found;
+    return null;
   }
+
+  // Which edge of `rect` the point (x,y) is closest to, or "center" when
+  // it's well inside the middle of the container (swap zone).
+  function edgeFromPoint(rect, x, y) {
+    const relX = (x - rect.x) / rect.w;
+    const relY = (y - rect.y) / rect.h;
+    const CENTER_MARGIN = 0.28;
+    if (relX > CENTER_MARGIN && relX < 1 - CENTER_MARGIN && relY > CENTER_MARGIN && relY < 1 - CENTER_MARGIN) {
+      return "center";
+    }
+    const distances = { left: relX, right: 1 - relX, top: relY, bottom: 1 - relY };
+    return Object.keys(distances).reduce((a, b) => (distances[b] < distances[a] ? b : a));
+  }
+
+  let dockIndicatorEl = null;
+
+  function updateDockIndicator(targetId, edge) {
+    if (!dockIndicatorEl) {
+      dockIndicatorEl = document.createElement("div");
+      dockIndicatorEl.className = "dockIndicator";
+      el.containersLayer.appendChild(dockIndicatorEl);
+    }
+    if (!targetId || !edge) {
+      dockIndicatorEl.style.display = "none";
+      return;
+    }
+    const rect = containerRects.get(targetId);
+    if (!rect) {
+      dockIndicatorEl.style.display = "none";
+      return;
+    }
+    dockIndicatorEl.style.display = "block";
+    dockIndicatorEl.classList.toggle("dockCenter", edge === "center");
+    let ix = rect.x;
+    let iy = rect.y;
+    let iw = rect.w;
+    let ih = rect.h;
+    if (edge === "left") iw = rect.w * 0.5;
+    else if (edge === "right") {
+      ix = rect.x + rect.w * 0.5;
+      iw = rect.w * 0.5;
+    } else if (edge === "top") ih = rect.h * 0.5;
+    else if (edge === "bottom") {
+      iy = rect.y + rect.h * 0.5;
+      ih = rect.h * 0.5;
+    }
+    dockIndicatorEl.style.left = `${Math.round(ix)}px`;
+    dockIndicatorEl.style.top = `${Math.round(iy)}px`;
+    dockIndicatorEl.style.width = `${Math.round(iw)}px`;
+    dockIndicatorEl.style.height = `${Math.round(ih)}px`;
+  }
+
+  function dockContainer(sourceId, targetId, edge) {
+    if (sourceId === targetId) return;
+    state.layout = removeLeaf(state.layout, sourceId);
+    state.layout = insertLeaf(state.layout, targetId, { type: "leaf", containerId: sourceId }, edge);
+    saveState();
+    layoutAll();
+  }
+
+  function swapContainerPositions(idA, idB) {
+    const leafA = findLeaf(state.layout, idA);
+    const leafB = findLeaf(state.layout, idB);
+    if (!leafA || !leafB) return;
+    leafA.containerId = idB;
+    leafB.containerId = idA;
+    saveState();
+    layoutAll();
+  }
+
+  function startDragDock(id, downEvent) {
+    const grip = downEvent.currentTarget;
+    const box = containerBoxes.get(id);
+    box?.el.classList.add("dragging");
+
+    let targetId = null;
+    let edge = null;
+
+    const onMove = (e) => {
+      const hit = containerFromPoint(e.clientX, e.clientY);
+      if (!hit || hit.id === id) {
+        targetId = null;
+        edge = null;
+      } else {
+        targetId = hit.id;
+        edge = edgeFromPoint(containerRects.get(hit.id), hit.x, hit.y);
+      }
+      updateDockIndicator(targetId, edge);
+    };
+
+    const onUp = () => {
+      try {
+        grip.releasePointerCapture(downEvent.pointerId);
+      } catch (e) {
+        /* ignore */
+      }
+      grip.removeEventListener("pointermove", onMove);
+      grip.removeEventListener("pointerup", onUp);
+      grip.removeEventListener("pointercancel", onUp);
+      box?.el.classList.remove("dragging");
+      updateDockIndicator(null, null);
+
+      if (targetId && edge === "center") swapContainerPositions(id, targetId);
+      else if (targetId && edge) dockContainer(id, targetId, edge);
+    };
+
+    grip.addEventListener("pointermove", onMove);
+    grip.addEventListener("pointerup", onUp);
+    grip.addEventListener("pointercancel", onUp);
+    try {
+      grip.setPointerCapture(downEvent.pointerId);
+    } catch (e) {
+      /* ignore — listeners above still work without capture */
+    }
+  }
+
+  // ---- Drag to reorder tiles / move them between containers ----
+
+  let reorderSource = null;
+  let reorderTarget = null;
+  let reorderHoverContainer = null;
 
   function startDragReorder(name, downEvent) {
     reorderSource = name;
@@ -810,7 +1036,8 @@
         if (reorderTarget) tiles.get(reorderTarget)?.el.classList.add("drag-target");
       }
       const owner = reorderTarget ? containerOf(reorderTarget) : null;
-      reorderHoverContainer = owner ? owner.id : containerFromPoint(e.clientX, e.clientY);
+      const hoverHit = containerFromPoint(e.clientX, e.clientY);
+      reorderHoverContainer = owner ? owner.id : hoverHit && hoverHit.id;
     };
 
     const onUp = () => {

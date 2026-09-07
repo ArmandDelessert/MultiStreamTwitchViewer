@@ -413,10 +413,11 @@ body {
   border: 1px solid rgba(239, 239, 241, 0.14);
   border-radius: var(--radius);
   pointer-events: none;
+  transition: left 0.2s ease, top 0.2s ease, width 0.2s ease, height 0.2s ease;
 }
-.containerBox.dragging,
-.containerBox.resizing {
+.containerBox.dragging {
   border-color: var(--accent);
+  opacity: 0.55;
 }
 
 .containerChrome {
@@ -475,26 +476,55 @@ body {
   cursor: pointer;
 }
 
-.containerResizeHandle {
+/* The draggable seam between two sibling panes of a split; dragging it
+   adjusts that split's ratio. Sits exactly in the GAP left between the
+   two panes' rects, so it never overlaps either one's content. */
+.containerDivider {
   position: absolute;
-  right: 2px;
-  bottom: 2px;
-  width: 20px;
-  height: 20px;
-  cursor: nwse-resize;
   pointer-events: auto;
-  opacity: 0.4;
-  z-index: 5;
+  z-index: 6;
+  transition: left 0.2s ease, top 0.2s ease, width 0.2s ease, height 0.2s ease;
 }
-.containerResizeHandle:hover,
-.containerResizeHandle:active { opacity: 0.9; }
-.containerResizeHandle::after {
+.containerDivider.horizontal { cursor: col-resize; }
+.containerDivider.vertical { cursor: row-resize; }
+.containerDivider::after {
   content: "";
   position: absolute;
-  right: 4px;
-  bottom: 4px;
-  width: 10px;
-  height: 10px;
-  border-right: 2px solid var(--text-dim);
-  border-bottom: 2px solid var(--text-dim);
+  background: var(--border);
+  transition: background 0.15s ease;
+}
+.containerDivider.horizontal::after {
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  transform: translateX(-50%);
+}
+.containerDivider.vertical::after {
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 2px;
+  transform: translateY(-50%);
+}
+.containerDivider:hover::after,
+.containerDivider.dragging::after {
+  background: var(--accent);
+}
+
+/* Shown while dragging a container's grip over another container, to
+   preview where it will dock (an edge strip) or that it will swap places
+   (the whole container, dashed). */
+.dockIndicator {
+  position: absolute;
+  display: none;
+  background: rgba(145, 71, 255, 0.28);
+  border: 2px solid var(--accent);
+  border-radius: 6px;
+  pointer-events: none;
+  z-index: 7;
+}
+.dockIndicator.dockCenter {
+  background: rgba(145, 71, 255, 0.16);
+  border-style: dashed;
 }
