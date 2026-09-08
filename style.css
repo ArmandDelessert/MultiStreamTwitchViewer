@@ -102,10 +102,13 @@ body {
   border-color: var(--accent);
 }
 .modeBtn.hidden { display: none; }
-
-.viewSwitch {
-  display: flex;
-  gap: 8px;
+.modeBtn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.modeBtn:disabled:hover {
+  color: var(--text-dim);
+  border-color: var(--border);
 }
 
 #fullscreenBtn {
@@ -515,6 +518,23 @@ body.view-freeform .tile .gripBtn { display: none; }
   padding: 5px 6px;
   font-size: 0.72rem;
   cursor: pointer;
+}
+
+/* Freeform-view region toolbars (all packed videos, and separately the one
+   put in front): no grip to hover, so their commands stay visible outright
+   instead of collapsing like a per-container toolbar does. */
+.standaloneChrome .containerToolbarExtra {
+  max-width: none;
+  opacity: 1;
+  overflow: visible;
+  padding-right: 6px;
+}
+.toolbarLabel {
+  padding: 0 4px 0 10px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--text-dim);
+  white-space: nowrap;
 }
 
 /* The draggable seam between two sibling panes of a split; dragging it

@@ -7,6 +7,23 @@
   const MIN_CONTAINER_W = 220; // px, enforced at interaction time via the live stage size
   const MIN_CONTAINER_H = 150;
 
+  const QUALITY_OPTIONS = [
+    ["auto", "Auto"],
+    ["1080p60", "1080p60"],
+    ["720p60", "720p60"],
+    ["480p30", "480p30"],
+    ["360p30", "360p30"],
+    ["160p30", "160p30"],
+  ];
+
+  // The two views, keyed by state.view: "containers" is the freely
+  // arranged/resizable containers; "freeform" packs every video in bulk and
+  // lets one be put forward. Single toggle button cycles between them.
+  const VIEWS = {
+    containers: { icon: "🗂", label: "Mosaïque", next: "freeform" },
+    freeform: { icon: "🎯", label: "Focus", next: "containers" },
+  };
+
   // Containers are tiled edge-to-edge across the whole stage, arranged as a
   // binary tree of splits (no overlap, no gaps left over): a leaf holds one
   // container's id, a split holds two children side by side ("horizontal")
@@ -21,8 +38,8 @@
     addForm: document.getElementById("addForm"),
     channelInput: document.getElementById("channelInput"),
     addContainerBtn: document.getElementById("addContainerBtn"),
-    viewContainersBtn: document.getElementById("viewContainersBtn"),
-    viewFreeformBtn: document.getElementById("viewFreeformBtn"),
+    viewToggleBtn: document.getElementById("viewToggleBtn"),
+    closeAllBtn: document.getElementById("closeAllBtn"),
     fullscreenBtn: document.getElementById("fullscreenBtn"),
     twitchAccountBtn: document.getElementById("twitchAccountBtn"),
     twitchPanel: document.getElementById("twitchPanel"),
@@ -628,8 +645,10 @@
   function layoutAll() {
     document.body.classList.toggle("view-freeform", state.view === "freeform");
     el.addContainerBtn.classList.toggle("hidden", state.view === "freeform");
-    el.viewContainersBtn.classList.toggle("active", state.view !== "freeform");
-    el.viewFreeformBtn.classList.toggle("active", state.view === "freeform");
+    const current = VIEWS[state.view] || VIEWS.containers;
+    el.viewToggleBtn.textContent = `${current.icon} ${current.label}`;
+    el.viewToggleBtn.title = `Vue « ${current.label} » active — cliquer pour passer à la vue « ${VIEWS[current.next].label} »`;
+    el.closeAllBtn.disabled = getAllChannels().length === 0;
     if (state.view === "freeform") {
       layoutFreeform();
     } else {
@@ -639,6 +658,8 @@
 
   function layoutContainersView() {
     destroyFreeformDivider();
+    destroyFreeformRegionBox("rest");
+    destroyFreeformRegionBox("focus");
     // Always keep at least one container (possibly empty) so there's
     // always something on the stage — an empty container shows its own
     // "add a channel" field instead of a whole-page placeholder.
@@ -725,16 +746,28 @@
     const focused = state.focused && names.includes(state.focused) ? state.focused : null;
     if (focused !== state.focused) state.focused = focused;
 
-    const rest = focused ? names.filter((n) => n !== focused) : [];
-    if (!focused || rest.length === 0) {
-      destroyFreeformDivider();
-      packGrid(names, stageRect.x + GAP, stageRect.y + GAP, stageRect.w - GAP * 2, stageRect.h - GAP * 2, positions);
+    const rest = focused ? names.filter((n) => n !== focused) : names.slice();
+    let mainRect = null;
+    let restRect = stageRect;
+    if (focused && rest.length > 0) {
+      const split = computeFocusSplit(stageRect, state.freeformRatio);
+      mainRect = split.mainRect;
+      restRect = split.restRect;
+      renderFreeformDivider(split.dir, mainRect, stageRect);
     } else {
-      const { dir, mainRect, restRect } = computeFocusSplit(stageRect, state.freeformRatio);
-      packGrid([focused], mainRect.x + GAP, mainRect.y + GAP, mainRect.w - GAP * 2, mainRect.h - GAP * 2, positions);
-      packGrid(rest, restRect.x + GAP, restRect.y + GAP, restRect.w - GAP * 2, restRect.h - GAP * 2, positions);
-      renderFreeformDivider(dir, mainRect, stageRect);
+      destroyFreeformDivider();
+      if (focused) mainRect = stageRect; // the sole open video fills the whole stage
     }
+
+    if (mainRect) {
+      packGrid([focused], mainRect.x + GAP, mainRect.y + GAP, mainRect.w - GAP * 2, mainRect.h - GAP * 2, positions);
+    }
+    packGrid(rest, restRect.x + GAP, restRect.y + GAP, restRect.w - GAP * 2, restRect.h - GAP * 2, positions);
+
+    if (rest.length > 0) renderFreeformRegionBox("rest", "🧩 Toutes les vidéos", restRect, rest);
+    else destroyFreeformRegionBox("rest");
+    if (mainRect && focused) renderFreeformRegionBox("focus", "🎯 Vidéo en avant", mainRect, [focused]);
+    else destroyFreeformRegionBox("focus");
 
     for (const [name, record] of tiles) {
       const pos = positions.get(name);
@@ -783,6 +816,114 @@
       btn.title = isFocused ? "Quitter le mode focus" : "Mettre cette vidéo en avant";
       btn.classList.toggle("active", isFocused);
     }
+  }
+
+  // ---- Freeform region controls: the same pause/mute/resync/quality
+  // commands a container offers, but applied in bulk to either every
+  // packed video ("rest") or, separately, to the one put in front
+  // ("focus") — so the focused video stays controllable on its own. ----
+
+  const freeformRegionBoxes = new Map(); // "rest" | "focus" -> {el, pauseBtn, muteBtn, resyncBtn, qualitySelect}
+
+  function createFreeformRegionBox(key, label) {
+    const box = document.createElement("div");
+    box.className = "containerBox freeformRegionBox";
+
+    const chrome = document.createElement("div");
+    chrome.className = "containerChrome standaloneChrome";
+
+    const labelEl = document.createElement("span");
+    labelEl.className = "toolbarLabel";
+    labelEl.textContent = label;
+    chrome.appendChild(labelEl);
+
+    const extra = document.createElement("div");
+    extra.className = "containerToolbarExtra";
+
+    const pauseBtn = document.createElement("button");
+    pauseBtn.className = "iconBtn";
+    extra.appendChild(pauseBtn);
+
+    const muteBtn = document.createElement("button");
+    muteBtn.className = "iconBtn";
+    muteBtn.textContent = "🔇";
+    muteBtn.title = "Couper le son";
+    extra.appendChild(muteBtn);
+
+    const resyncBtn = document.createElement("button");
+    resyncBtn.className = "iconBtn";
+    resyncBtn.textContent = "⏩";
+    resyncBtn.title = "Rattraper le direct";
+    extra.appendChild(resyncBtn);
+
+    const qualitySelect = document.createElement("select");
+    qualitySelect.title = "Qualité vidéo";
+    QUALITY_OPTIONS.forEach(([value, text]) => {
+      const opt = document.createElement("option");
+      opt.value = value;
+      opt.textContent = text;
+      qualitySelect.appendChild(opt);
+    });
+    qualitySelect.addEventListener("click", (e) => e.stopPropagation());
+    extra.appendChild(qualitySelect);
+
+    chrome.appendChild(extra);
+    box.appendChild(chrome);
+    el.containersLayer.appendChild(box);
+
+    const rec = { el: box, pauseBtn, muteBtn, resyncBtn, qualitySelect };
+    freeformRegionBoxes.set(key, rec);
+    return rec;
+  }
+
+  function destroyFreeformRegionBox(key) {
+    const rec = freeformRegionBoxes.get(key);
+    if (rec) rec.el.remove();
+    freeformRegionBoxes.delete(key);
+  }
+
+  function renderFreeformRegionBox(key, label, rect, names) {
+    const rec = freeformRegionBoxes.get(key) || createFreeformRegionBox(key, label);
+
+    rec.el.style.left = `${Math.round(rect.x)}px`;
+    rec.el.style.top = `${Math.round(rect.y)}px`;
+    rec.el.style.width = `${Math.round(rect.w)}px`;
+    rec.el.style.height = `${Math.round(rect.h)}px`;
+
+    const playing = names.every((n) => tiles.get(n)?.playing);
+    rec.pauseBtn.textContent = playing ? "⏸" : "▶";
+    rec.pauseBtn.title = playing ? "Mettre ces vidéos en pause" : "Lancer la lecture de ces vidéos";
+    rec.pauseBtn.onclick = (e) => {
+      e.stopPropagation();
+      const shouldPause = names.every((n) => tiles.get(n)?.playing);
+      for (const n of names) {
+        const record = tiles.get(n);
+        if (!record) continue;
+        try {
+          if (shouldPause) record.player?.pause();
+          else record.player?.play();
+        } catch (e2) {
+          /* ignore */
+        }
+        record.playing = !shouldPause;
+      }
+      layoutAll();
+    };
+    rec.muteBtn.onclick = (e) => {
+      e.stopPropagation();
+      for (const n of names) {
+        state.muted[n] = true;
+        setPlayerMuted(n, true);
+      }
+      saveState();
+    };
+    rec.resyncBtn.onclick = (e) => {
+      e.stopPropagation();
+      for (const n of names) resyncToLive(n);
+    };
+    rec.qualitySelect.onchange = () => {
+      for (const n of names) setPlayerQuality(n, rec.qualitySelect.value);
+    };
   }
 
   // ---- Freeform divider (drag the seam between the focused video and the
@@ -942,14 +1083,7 @@
 
     const qualitySelect = document.createElement("select");
     qualitySelect.title = "Qualité vidéo pour ce conteneur";
-    [
-      ["auto", "Auto"],
-      ["1080p60", "1080p60"],
-      ["720p60", "720p60"],
-      ["480p30", "480p30"],
-      ["360p30", "360p30"],
-      ["160p30", "160p30"],
-    ].forEach(([value, label]) => {
+    QUALITY_OPTIONS.forEach(([value, label]) => {
       const opt = document.createElement("option");
       opt.value = value;
       opt.textContent = label;
@@ -1778,8 +1912,27 @@
     saveState();
     layoutAll();
   }
-  el.viewContainersBtn.addEventListener("click", () => setView("containers"));
-  el.viewFreeformBtn.addEventListener("click", () => setView("freeform"));
+  el.viewToggleBtn.addEventListener("click", () => {
+    setView((VIEWS[state.view] || VIEWS.containers).next);
+  });
+
+  // Closes every video currently open, in either view.
+  function closeAllVideos() {
+    const names = getAllChannels();
+    if (names.length === 0) return;
+    if (!window.confirm(`Fermer les ${names.length} vidéo(s) actuellement ouvertes ?`)) return;
+    for (const name of names) {
+      delete state.muted[name];
+      destroyTile(name);
+    }
+    const c = defaultContainer();
+    state.containers = [c];
+    state.layout = { type: "leaf", containerId: c.id };
+    state.focused = null;
+    saveState();
+    layoutAll();
+  }
+  el.closeAllBtn.addEventListener("click", closeAllVideos);
 
   el.fullscreenBtn.addEventListener("click", () => {
     if (!document.fullscreenElement) {
