@@ -11,7 +11,7 @@
   // binary tree of splits (no overlap, no gaps left over): a leaf holds one
   // container's id, a split holds two children side by side ("horizontal")
   // or stacked ("vertical") with `ratio` giving the first child's share.
-  /** @type {{containers: {id:string, channels:string[]}[], layout: object|null, muted: Record<string, boolean>, quality: string}} */
+  /** @type {{containers: {id:string, channels:string[]}[], layout: object|null, muted: Record<string, boolean>, quality: string, view: string, focused: string|null, freeformRatio: number}} */
   let state = loadState();
 
   const el = {
@@ -21,6 +21,8 @@
     addForm: document.getElementById("addForm"),
     channelInput: document.getElementById("channelInput"),
     addContainerBtn: document.getElementById("addContainerBtn"),
+    viewContainersBtn: document.getElementById("viewContainersBtn"),
+    viewFreeformBtn: document.getElementById("viewFreeformBtn"),
     fullscreenBtn: document.getElementById("fullscreenBtn"),
     twitchAccountBtn: document.getElementById("twitchAccountBtn"),
     twitchPanel: document.getElementById("twitchPanel"),
@@ -127,6 +129,12 @@
             layout,
             muted: parsed.muted && typeof parsed.muted === "object" ? parsed.muted : {},
             quality: typeof parsed.quality === "string" ? parsed.quality : "auto",
+            view: parsed.view === "freeform" ? "freeform" : "containers",
+            focused: typeof parsed.focused === "string" ? parsed.focused : null,
+            freeformRatio:
+              typeof parsed.freeformRatio === "number" && parsed.freeformRatio > 0 && parsed.freeformRatio < 1
+                ? parsed.freeformRatio
+                : 0.7,
           };
         }
         // Migrate the even older single-list shape (channels[] + zoneA/mode)
@@ -138,13 +146,16 @@
             layout: buildTreeFromContainers(containers),
             muted: parsed.muted && typeof parsed.muted === "object" ? parsed.muted : {},
             quality: typeof parsed.quality === "string" ? parsed.quality : "auto",
+            view: "containers",
+            focused: null,
+            freeformRatio: 0.7,
           };
         }
       }
     } catch (e) {
       console.warn("Failed to load state", e);
     }
-    return { containers: [], layout: null, muted: {}, quality: "auto" };
+    return { containers: [], layout: null, muted: {}, quality: "auto", view: "containers", focused: null, freeformRatio: 0.7 };
   }
 
   function saveState() {
@@ -350,6 +361,19 @@
     nameEl.className = "tileName";
     nameEl.textContent = name;
     row.appendChild(nameEl);
+
+    // Only shown/usable in the "freeform" view: puts this video forward,
+    // enlarging it and making it the only one with sound.
+    const focusBtn = document.createElement("button");
+    focusBtn.className = "iconBtn focusBtn";
+    focusBtn.textContent = "⤢";
+    focusBtn.title = "Mettre cette vidéo en avant";
+    focusBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+    focusBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      setFocused(name);
+    });
+    row.appendChild(focusBtn);
 
     const removeBtn = document.createElement("button");
     removeBtn.className = "iconBtn danger";
@@ -602,6 +626,19 @@
   }
 
   function layoutAll() {
+    document.body.classList.toggle("view-freeform", state.view === "freeform");
+    el.addContainerBtn.classList.toggle("hidden", state.view === "freeform");
+    el.viewContainersBtn.classList.toggle("active", state.view !== "freeform");
+    el.viewFreeformBtn.classList.toggle("active", state.view === "freeform");
+    if (state.view === "freeform") {
+      layoutFreeform();
+    } else {
+      layoutContainersView();
+    }
+  }
+
+  function layoutContainersView() {
+    destroyFreeformDivider();
     // Always keep at least one container (possibly empty) so there's
     // always something on the stage — an empty container shows its own
     // "add a channel" field instead of a whole-page placeholder.
@@ -645,6 +682,184 @@
       record.el.style.top = `${Math.round(pos.y)}px`;
       record.el.style.width = `${Math.floor(pos.w)}px`;
       record.el.style.height = `${Math.floor(pos.h)}px`;
+    }
+  }
+
+  // ---- Freeform view: every video from every container, packed in bulk
+  // to maximize each tile's size with minimal wasted space (same packing
+  // algorithm as inside one container). Putting a video "in front" splits
+  // the stage into a main pane (that video, enlarged and the only one
+  // unmuted) and a pane on the side/below where the rest keep packing
+  // themselves the same way. ----
+
+  // Splits the stage into a main rect and a rest rect, side by side on a
+  // wide stage or stacked on a tall one, so the main video gets as much
+  // room as the stage shape allows.
+  function computeFocusSplit(stageRect, ratio) {
+    if (stageRect.w >= stageRect.h) {
+      const mainW = clamp(0, Math.round((stageRect.w - GAP) * ratio), stageRect.w - GAP);
+      return {
+        dir: "horizontal",
+        mainRect: { x: stageRect.x, y: stageRect.y, w: mainW, h: stageRect.h },
+        restRect: { x: stageRect.x + mainW + GAP, y: stageRect.y, w: stageRect.w - GAP - mainW, h: stageRect.h },
+      };
+    }
+    const mainH = clamp(0, Math.round((stageRect.h - GAP) * ratio), stageRect.h - GAP);
+    return {
+      dir: "vertical",
+      mainRect: { x: stageRect.x, y: stageRect.y, w: stageRect.w, h: mainH },
+      restRect: { x: stageRect.x, y: stageRect.y + mainH + GAP, w: stageRect.w, h: stageRect.h - GAP - mainH },
+    };
+  }
+
+  function layoutFreeform() {
+    for (const id of [...containerBoxes.keys()]) destroyContainerBox(id);
+    for (const id of [...dividerEls.keys()]) destroyDivider(id);
+    updateDockIndicator(null, null);
+
+    const rect = el.stage.getBoundingClientRect();
+    const stageRect = { x: 0, y: 0, w: rect.width, h: rect.height };
+    const names = getAllChannels();
+    const positions = new Map();
+
+    const focused = state.focused && names.includes(state.focused) ? state.focused : null;
+    if (focused !== state.focused) state.focused = focused;
+
+    const rest = focused ? names.filter((n) => n !== focused) : [];
+    if (!focused || rest.length === 0) {
+      destroyFreeformDivider();
+      packGrid(names, stageRect.x + GAP, stageRect.y + GAP, stageRect.w - GAP * 2, stageRect.h - GAP * 2, positions);
+    } else {
+      const { dir, mainRect, restRect } = computeFocusSplit(stageRect, state.freeformRatio);
+      packGrid([focused], mainRect.x + GAP, mainRect.y + GAP, mainRect.w - GAP * 2, mainRect.h - GAP * 2, positions);
+      packGrid(rest, restRect.x + GAP, restRect.y + GAP, restRect.w - GAP * 2, restRect.h - GAP * 2, positions);
+      renderFreeformDivider(dir, mainRect, stageRect);
+    }
+
+    for (const [name, record] of tiles) {
+      const pos = positions.get(name);
+      if (!pos) {
+        record.el.style.width = "0px";
+        record.el.style.height = "0px";
+        record.el.classList.remove("tileFocused");
+        continue;
+      }
+      record.el.style.left = `${Math.round(pos.x)}px`;
+      record.el.style.top = `${Math.round(pos.y)}px`;
+      record.el.style.width = `${Math.floor(pos.w)}px`;
+      record.el.style.height = `${Math.floor(pos.h)}px`;
+      record.el.classList.toggle("tileFocused", name === focused);
+    }
+
+    updateFocusButtons(focused);
+  }
+
+  // Puts `name` forward (or, if it's already the focused one, returns to
+  // plain freeform): the focused video becomes the only one with sound;
+  // leaving focus mutes it back, same as a freshly added channel.
+  function setFocused(name) {
+    if (state.focused === name) {
+      state.muted[name] = true;
+      setPlayerMuted(name, true);
+      state.focused = null;
+    } else {
+      for (const n of getAllChannels()) {
+        const muted = n !== name;
+        state.muted[n] = muted;
+        setPlayerMuted(n, muted);
+      }
+      state.focused = name;
+    }
+    saveState();
+    layoutAll();
+  }
+
+  function updateFocusButtons(focused) {
+    for (const [name, record] of tiles) {
+      const btn = record.el.querySelector(".focusBtn");
+      if (!btn) continue;
+      const isFocused = name === focused;
+      btn.textContent = isFocused ? "⤡" : "⤢";
+      btn.title = isFocused ? "Quitter le mode focus" : "Mettre cette vidéo en avant";
+      btn.classList.toggle("active", isFocused);
+    }
+  }
+
+  // ---- Freeform divider (drag the seam between the focused video and the
+  // rest to adjust how much space it gets) ----
+
+  let freeformDividerEl = null;
+  let freeformDividerMeta = null;
+
+  function destroyFreeformDivider() {
+    if (freeformDividerEl) freeformDividerEl.remove();
+    freeformDividerEl = null;
+    freeformDividerMeta = null;
+  }
+
+  function renderFreeformDivider(dir, mainRect, stageRect) {
+    if (!freeformDividerEl) {
+      freeformDividerEl = document.createElement("div");
+      freeformDividerEl.className = "containerDivider";
+      freeformDividerEl.addEventListener("pointerdown", (e) => {
+        e.stopPropagation();
+        startResizeFreeformDivider(e);
+      });
+      el.containersLayer.appendChild(freeformDividerEl);
+    }
+    freeformDividerEl.classList.toggle("horizontal", dir === "horizontal");
+    freeformDividerEl.classList.toggle("vertical", dir === "vertical");
+    const rect =
+      dir === "horizontal"
+        ? { x: mainRect.x + mainRect.w, y: stageRect.y, w: GAP, h: stageRect.h }
+        : { x: stageRect.x, y: mainRect.y + mainRect.h, w: stageRect.w, h: GAP };
+    freeformDividerEl.style.left = `${Math.round(rect.x)}px`;
+    freeformDividerEl.style.top = `${Math.round(rect.y)}px`;
+    freeformDividerEl.style.width = `${Math.round(rect.w)}px`;
+    freeformDividerEl.style.height = `${Math.round(rect.h)}px`;
+    freeformDividerMeta = { dir, stageRect };
+  }
+
+  function startResizeFreeformDivider(downEvent) {
+    const handle = freeformDividerEl;
+    const meta = freeformDividerMeta;
+    if (!handle || !meta) return;
+    handle.classList.add("dragging");
+    const { dir, stageRect } = meta;
+    const totalPx = dir === "horizontal" ? stageRect.w : stageRect.h;
+    const minPx = dir === "horizontal" ? MIN_CONTAINER_W : MIN_CONTAINER_H;
+    const startPos = dir === "horizontal" ? downEvent.clientX : downEvent.clientY;
+    const startRatio = state.freeformRatio;
+
+    const onMove = (e) => {
+      const pos = dir === "horizontal" ? e.clientX : e.clientY;
+      const delta = (pos - startPos) / totalPx;
+      const minRatio = clamp(0, minPx / totalPx, 1);
+      const maxRatio = clamp(minRatio, 1 - minRatio, 1);
+      state.freeformRatio = clamp(minRatio, startRatio + delta, maxRatio);
+      layoutAll();
+    };
+
+    const onUp = () => {
+      try {
+        handle.releasePointerCapture(downEvent.pointerId);
+      } catch (e) {
+        /* ignore */
+      }
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onUp);
+      handle.removeEventListener("pointercancel", onUp);
+      handle.classList.remove("dragging");
+      saveState();
+    };
+
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp);
+    handle.addEventListener("pointercancel", onUp);
+    try {
+      handle.setPointerCapture(downEvent.pointerId);
+    } catch (e) {
+      /* ignore */
     }
   }
 
@@ -1556,6 +1771,15 @@
   });
 
   el.addContainerBtn.addEventListener("click", addContainer);
+
+  function setView(view) {
+    if (state.view === view) return;
+    state.view = view;
+    saveState();
+    layoutAll();
+  }
+  el.viewContainersBtn.addEventListener("click", () => setView("containers"));
+  el.viewFreeformBtn.addEventListener("click", () => setView("freeform"));
 
   el.fullscreenBtn.addEventListener("click", () => {
     if (!document.fullscreenElement) {

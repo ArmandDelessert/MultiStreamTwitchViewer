@@ -103,6 +103,11 @@ body {
 }
 .modeBtn.hidden { display: none; }
 
+.viewSwitch {
+  display: flex;
+  gap: 8px;
+}
+
 #fullscreenBtn {
   background: var(--panel-2);
   border: 1px solid var(--border);
@@ -314,6 +319,12 @@ body {
   box-shadow: inset 0 0 0 3px var(--accent);
 }
 
+/* The video currently put "in front" in the freeform view. */
+.tile.tileFocused {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
 /* Everything (name, drag handle, remove, and the action buttons) lives in
    this top overlay, on purpose: it never overlaps Twitch's own control bar
    at the bottom of the player, so their native buttons stay clickable. */
@@ -379,6 +390,13 @@ body {
 .iconBtn:hover { background: var(--accent); }
 .iconBtn.danger:hover { background: var(--danger); }
 .iconBtn.hidden { display: none; }
+
+/* Only usable in the freeform ("Vrac") view — hidden otherwise, along with
+   the container-move grip, which has nothing to move between there. */
+.focusBtn { display: none; }
+.focusBtn.active { background: var(--accent); }
+body.view-freeform .tile .focusBtn { display: flex; }
+body.view-freeform .tile .gripBtn { display: none; }
 
 /* ---- Containers ----
    A container is a freely movable/resizable box that groups a subset of
