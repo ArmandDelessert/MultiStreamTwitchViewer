@@ -6,6 +6,7 @@
   const STORAGE_KEY = "twitchMultiView.state.v1";
   const MIN_CONTAINER_W = 220; // px, enforced at interaction time via the live stage size
   const MIN_CONTAINER_H = 150;
+  const MAGNET_PX = 18; // how close (in screen px) a divider drag must get to an ideal ratio to snap to it
 
   const QUALITY_OPTIONS = [
     ["auto", "Auto"],
@@ -753,7 +754,7 @@
       const split = computeFocusSplit(stageRect, state.freeformRatio);
       mainRect = split.mainRect;
       restRect = split.restRect;
-      renderFreeformDivider(split.dir, mainRect, stageRect);
+      renderFreeformDivider(split.dir, mainRect, stageRect, rest.length);
     } else {
       destroyFreeformDivider();
       if (focused) mainRect = stageRect; // the sole open video fills the whole stage
@@ -938,7 +939,7 @@
     freeformDividerMeta = null;
   }
 
-  function renderFreeformDivider(dir, mainRect, stageRect) {
+  function renderFreeformDivider(dir, mainRect, stageRect, restCount) {
     if (!freeformDividerEl) {
       freeformDividerEl = document.createElement("div");
       freeformDividerEl.className = "containerDivider";
@@ -958,7 +959,7 @@
     freeformDividerEl.style.top = `${Math.round(rect.y)}px`;
     freeformDividerEl.style.width = `${Math.round(rect.w)}px`;
     freeformDividerEl.style.height = `${Math.round(rect.h)}px`;
-    freeformDividerMeta = { dir, stageRect };
+    freeformDividerMeta = { dir, stageRect, restCount };
   }
 
   function startResizeFreeformDivider(downEvent) {
@@ -966,9 +967,12 @@
     const meta = freeformDividerMeta;
     if (!handle || !meta) return;
     handle.classList.add("dragging");
-    const { dir, stageRect } = meta;
+    const { dir, stageRect, restCount } = meta;
     const totalPx = dir === "horizontal" ? stageRect.w : stageRect.h;
+    const crossPx = dir === "horizontal" ? stageRect.h : stageRect.w;
     const minPx = dir === "horizontal" ? MIN_CONTAINER_W : MIN_CONTAINER_H;
+    const idealRatios = computeIdealRatios(1, restCount, totalPx, crossPx, minPx);
+    showMagnetTicks(dir, stageRect, idealRatios);
     const startPos = dir === "horizontal" ? downEvent.clientX : downEvent.clientY;
     const startRatio = state.freeformRatio;
 
@@ -977,7 +981,8 @@
       const delta = (pos - startPos) / totalPx;
       const minRatio = clamp(0, minPx / totalPx, 1);
       const maxRatio = clamp(minRatio, 1 - minRatio, 1);
-      state.freeformRatio = clamp(minRatio, startRatio + delta, maxRatio);
+      const rawRatio = clamp(minRatio, startRatio + delta, maxRatio);
+      state.freeformRatio = applyMagnet(rawRatio, idealRatios, totalPx, MAGNET_PX);
       layoutAll();
     };
 
@@ -991,6 +996,7 @@
       handle.removeEventListener("pointerup", onUp);
       handle.removeEventListener("pointercancel", onUp);
       handle.classList.remove("dragging");
+      clearMagnetTicks();
       saveState();
     };
 
@@ -1237,12 +1243,11 @@
     return Math.max(0, w * h - n * packed.w * packed.h);
   }
 
-  // The ratios a divider should snap to: the ones that leave the least
-  // unused space on both sides combined ("ideal" positions), plus a few
-  // evenly-spaced in-between ones whenever two ideal spots are far apart —
-  // so dragging feels like choosing from a short list of good layouts
-  // rather than a fully free, continuous resize.
-  function computeSnapRatios(n1, n2, totalPx, crossPx, minPx) {
+  // The "ideal" ratios for a divider: the positions that leave the least
+  // unused space on both sides combined. Dragging stays free-form
+  // everywhere else; it only snaps once the cursor comes within MAGNET_PX
+  // of one of these (see applyMagnet).
+  function computeIdealRatios(n1, n2, totalPx, crossPx, minPx) {
     const avail = totalPx - GAP;
     const lo = clamp(0, minPx, avail);
     const hi = clamp(lo, avail - minPx, avail);
@@ -1258,35 +1263,39 @@
     samples.forEach((cur, i) => {
       const prev = samples[i - 1];
       const next = samples[i + 1];
-      const isEdge = i === 0 || i === samples.length - 1;
-      const isLocalMin = (!prev || cur.waste <= prev.waste) && (!next || cur.waste <= next.waste);
-      if ((isLocalMin || isEdge) && (!notches.length || cur.s - notches[notches.length - 1] > step)) {
+      const isLocalMin = (!prev || cur.waste < prev.waste) && (!next || cur.waste < next.waste);
+      if (isLocalMin && (!notches.length || cur.s - notches[notches.length - 1] > step)) {
         notches.push(cur.s);
       }
     });
 
-    const maxGap = Math.max(minPx * 1.4, (hi - lo) * 0.18);
-    const filled = [];
-    notches.forEach((s, i) => {
-      filled.push(s);
-      const next = notches[i + 1];
-      if (next === undefined) return;
-      const extra = Math.floor((next - s) / maxGap);
-      for (let k = 1; k <= extra; k++) filled.push(s + ((next - s) * k) / (extra + 1));
-    });
+    return notches.map((s) => clamp(0, s / avail, 1));
+  }
 
-    return filled.map((s) => clamp(0, s / avail, 1));
+  // Snaps `rawRatio` to the nearest ideal ratio only if that ideal ratio is
+  // within MAGNET_PX on screen; otherwise the drag stays completely free.
+  function applyMagnet(rawRatio, idealRatios, totalPx, magnetPx) {
+    let best = null;
+    let bestDist = Infinity;
+    for (const r of idealRatios) {
+      const dist = Math.abs(r - rawRatio) * totalPx;
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = r;
+      }
+    }
+    return best !== null && bestDist <= magnetPx ? best : rawRatio;
   }
 
   // Small tick marks shown along a divider's track while it's being
-  // dragged, one per snap ratio, so it's visible which discrete positions
-  // are on offer instead of it just feeling like it randomly "sticks".
-  let snapTickEls = [];
+  // dragged, one per ideal ratio, so it's visible where it'll magnetize
+  // instead of it just feeling like it randomly "sticks".
+  let magnetTickEls = [];
 
-  function showSnapTicks(dir, parentRect, snapRatios) {
-    clearSnapTicks();
+  function showMagnetTicks(dir, parentRect, idealRatios) {
+    clearMagnetTicks();
     const avail = (dir === "horizontal" ? parentRect.w : parentRect.h) - GAP;
-    for (const r of snapRatios) {
+    for (const r of idealRatios) {
       const tick = document.createElement("div");
       tick.className = `snapTick ${dir}`;
       const offset = clamp(0, Math.round(avail * r), avail) + GAP / 2;
@@ -1300,13 +1309,13 @@
         tick.style.width = `${Math.round(parentRect.w)}px`;
       }
       el.containersLayer.appendChild(tick);
-      snapTickEls.push(tick);
+      magnetTickEls.push(tick);
     }
   }
 
-  function clearSnapTicks() {
-    for (const t of snapTickEls) t.remove();
-    snapTickEls = [];
+  function clearMagnetTicks() {
+    for (const t of magnetTickEls) t.remove();
+    magnetTickEls = [];
   }
 
   function startResizeDivider(splitId, downEvent) {
@@ -1322,8 +1331,8 @@
     const minPx = dir === "horizontal" ? MIN_CONTAINER_W : MIN_CONTAINER_H;
     const n1 = countChannelsInSubtree(node.children[0]);
     const n2 = countChannelsInSubtree(node.children[1]);
-    const snapRatios = computeSnapRatios(n1, n2, totalPx, crossPx, minPx);
-    showSnapTicks(dir, parentRect, snapRatios);
+    const idealRatios = computeIdealRatios(n1, n2, totalPx, crossPx, minPx);
+    showMagnetTicks(dir, parentRect, idealRatios);
 
     const startX = downEvent.clientX;
     const startY = downEvent.clientY;
@@ -1333,16 +1342,7 @@
       const delta =
         dir === "horizontal" ? (e.clientX - startX) / parentRect.w : (e.clientY - startY) / parentRect.h;
       const rawRatio = clamp(0, startRatio + delta, 1);
-      let snapped = snapRatios[0];
-      let bestDist = Infinity;
-      for (const r of snapRatios) {
-        const dist = Math.abs(r - rawRatio);
-        if (dist < bestDist) {
-          bestDist = dist;
-          snapped = r;
-        }
-      }
-      node.ratio = snapped;
+      node.ratio = applyMagnet(rawRatio, idealRatios, totalPx, MAGNET_PX);
       layoutAll();
     };
 
@@ -1356,7 +1356,7 @@
       handle.removeEventListener("pointerup", onUp);
       handle.removeEventListener("pointercancel", onUp);
       rec?.el.classList.remove("dragging");
-      clearSnapTicks();
+      clearMagnetTicks();
       saveState();
     };
 
