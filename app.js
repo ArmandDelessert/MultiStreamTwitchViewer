@@ -6,7 +6,7 @@
   const STORAGE_KEY = "twitchMultiView.state.v1";
   const MIN_CONTAINER_W = 220; // px, enforced at interaction time via the live stage size
   const MIN_CONTAINER_H = 150;
-  const MAGNET_PX = 18; // how close (in screen px) a divider drag must get to an ideal ratio to snap to it
+  const MAGNET_PX = 32; // how close (in screen px) a divider drag must get to an ideal ratio to snap to it
 
   const QUALITY_OPTIONS = [
     ["auto", "Auto"],
@@ -971,7 +971,7 @@
     const totalPx = dir === "horizontal" ? stageRect.w : stageRect.h;
     const crossPx = dir === "horizontal" ? stageRect.h : stageRect.w;
     const minPx = dir === "horizontal" ? MIN_CONTAINER_W : MIN_CONTAINER_H;
-    const idealRatios = computeIdealRatios(1, restCount, totalPx, crossPx, minPx);
+    const idealRatios = computeIdealRatios(1, restCount, totalPx, crossPx, minPx, dir);
     showMagnetTicks(dir, stageRect, idealRatios);
     const startPos = dir === "horizontal" ? downEvent.clientX : downEvent.clientY;
     const startRatio = state.freeformRatio;
@@ -1243,27 +1243,42 @@
     return Math.max(0, w * h - n * packed.w * packed.h);
   }
 
+  // paneWastedPx isn't W/H-symmetric (it targets a 16:9 landscape ratio), so
+  // the pane's on-screen width and height must be passed in the right
+  // order: for a horizontal split `s` is the pane's width and `crossPx` its
+  // height, but for a vertical split it's the other way around.
+  function paneWasteForSplit(n, s, crossPx, dir) {
+    return dir === "horizontal" ? paneWastedPx(n, s, crossPx) : paneWastedPx(n, crossPx, s);
+  }
+
   // The "ideal" ratios for a divider: the positions that leave the least
   // unused space on both sides combined. Dragging stays free-form
   // everywhere else; it only snaps once the cursor comes within MAGNET_PX
   // of one of these (see applyMagnet).
-  function computeIdealRatios(n1, n2, totalPx, crossPx, minPx) {
+  function computeIdealRatios(n1, n2, totalPx, crossPx, minPx, dir) {
     const avail = totalPx - GAP;
     const lo = clamp(0, minPx, avail);
     const hi = clamp(lo, avail - minPx, avail);
     if (hi <= lo) return [0.5];
 
-    const waste = (s) => paneWastedPx(n1, s, crossPx) + paneWastedPx(n2, avail - GAP - s, crossPx);
+    const waste = (s) => paneWasteForSplit(n1, s, crossPx, dir) + paneWasteForSplit(n2, avail - GAP - s, crossPx, dir);
     const step = Math.max(2, Math.round((hi - lo) / 300));
     const samples = [];
     for (let s = lo; s <= hi; s += step) samples.push({ s, waste: waste(s) });
     if (samples[samples.length - 1].s !== hi) samples.push({ s: hi, waste: waste(hi) });
 
+    // A basin can land on a flat, several-samples-wide plateau (pixel
+    // rounding gives identical waste across a small range) rather than a
+    // sharp point. Non-strict on the way down (lets it enter/stay on a
+    // plateau) but strict on the way up (only the last, about-to-rise
+    // sample of that plateau counts) picks exactly one point per genuine
+    // basin — without also matching every step of an otherwise-monotonic
+    // slope, which would flood the list with non-optimal points.
     const notches = [];
     samples.forEach((cur, i) => {
       const prev = samples[i - 1];
       const next = samples[i + 1];
-      const isLocalMin = (!prev || cur.waste < prev.waste) && (!next || cur.waste < next.waste);
+      const isLocalMin = (!prev || cur.waste <= prev.waste) && (!next || cur.waste < next.waste);
       if (isLocalMin && (!notches.length || cur.s - notches[notches.length - 1] > step)) {
         notches.push(cur.s);
       }
@@ -1331,7 +1346,7 @@
     const minPx = dir === "horizontal" ? MIN_CONTAINER_W : MIN_CONTAINER_H;
     const n1 = countChannelsInSubtree(node.children[0]);
     const n2 = countChannelsInSubtree(node.children[1]);
-    const idealRatios = computeIdealRatios(n1, n2, totalPx, crossPx, minPx);
+    const idealRatios = computeIdealRatios(n1, n2, totalPx, crossPx, minPx, dir);
     showMagnetTicks(dir, parentRect, idealRatios);
 
     const startX = downEvent.clientX;
